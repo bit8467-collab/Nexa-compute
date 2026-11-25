@@ -1,0 +1,16 @@
+{
+  "name": "nexa-compute-render",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.15.15",
+    "express": "^4.21.2"
+  }
+}
