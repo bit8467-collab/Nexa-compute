@@ -141,6 +141,7 @@
                 <button type="button" class="admin-nav-item" data-admin-section="investments"><span class="admin-nav-icon" aria-hidden="true">▤</span><span>Posizioni registrate</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="wallets"><span class="admin-nav-icon" aria-hidden="true">⌁</span><span>Indirizzi di deposito USDT</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="verification"><span class="admin-nav-icon" aria-hidden="true">✉</span><span>Verifica email</span><span class="admin-nav-badge" data-admin-badge="verification" hidden aria-hidden="true">0</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="password-recovery" data-admin-permission="verification" data-admin-no-permission><span class="admin-nav-icon" aria-hidden="true">↻</span><span>OTP recupero password</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="deposit-requests"><span class="admin-nav-icon" aria-hidden="true">⇩</span><span>Richieste depositi</span><span class="admin-nav-badge" data-admin-badge="depositRequests" hidden aria-hidden="true">0</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="withdrawal-requests"><span class="admin-nav-icon" aria-hidden="true">⇧</span><span>Richieste prelievi</span><span class="admin-nav-badge" data-admin-badge="withdrawalRequests" hidden aria-hidden="true">0</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="servers"><span class="admin-nav-icon" aria-hidden="true">▣</span><span>Server acquistati · stato manuale</span><span class="admin-nav-badge" data-admin-badge="servers" hidden aria-hidden="true">0</span></button>
@@ -173,6 +174,9 @@
               </section>
               <section class="admin-page" data-admin-page="verification" hidden>
                 <div class="admin-page-head"><h1>Verifica email</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Destinatario</th><th>Stato</th><th>Richiesta</th><th>Azione</th></tr></thead><tbody id="adminEmailVerifications"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="password-recovery" data-admin-permission="verification" hidden>
+                <div class="admin-page-head"><h1>Richieste OTP recupero password</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Destinatario</th><th>Stato</th><th>Richiesta</th><th>Azione</th></tr></thead><tbody id="adminPasswordRecoveryRequests"></tbody></table></div>
               </section>
               <section class="admin-page" data-admin-page="deposit-requests" hidden>
                 <div class="admin-page-head"><h1>Richieste depositi</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Rete / TXHash</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminDepositRequests"></tbody></table></div>
