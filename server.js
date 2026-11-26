@@ -365,12 +365,14 @@ const websimWorker = {
       if (method === "GET" && path === "/api/pwa-manifest") return new Response(JSON.stringify({ name: "Nexa Compute", short_name: "Nexa", id: "/", start_url: "/", scope: "/", display: "standalone", background_color: "#0b1020", theme_color: "#0b1020", icons: [{ src: "/api/pwa-icon", sizes: "192x192", type: "image/svg+xml", purpose: "any" }, { src: "/api/pwa-icon", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }] }), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" } });
       if (method === "GET" && path === "/api/pwa-icon") return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b1020"/><rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="#c39a46" stroke-width="10"/><text x="256" y="302" text-anchor="middle" font-family="Arial,sans-serif" font-size="190" font-weight="800" fill="#e8c876">NX</text></svg>`, { headers: { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
       if (method === "GET" && path === "/api/pwa-worker") return new Response(`self.addEventListener("install",event=>event.waitUntil(self.skipWaiting()));self.addEventListener("activate",event=>event.waitUntil(self.clients.claim()));`, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/", "Cache-Control": "no-cache" } });
-    const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
-    if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
-    let tursoDB;
-    try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
-    catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
-    env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
+    if (!env.TURSO_DB_BOUND) {
+      const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
+      if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
+      let tursoDB;
+      try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
+      catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
+      env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
+    }
     await env.DB.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -1403,7 +1405,7 @@ function makeD1Adapter(client) {
     }
   };
 }
-const env = { DB: makeD1Adapter(libsql) };
+const env = { DB: makeD1Adapter(libsql), TURSO_DB_BOUND: true };
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
