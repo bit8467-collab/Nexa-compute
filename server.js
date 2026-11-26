@@ -400,6 +400,12 @@ const websimWorker = {
         user_id TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS admin_operators (
+        user_id TEXT PRIMARY KEY,
+        permissions TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS wallets (
         user_id TEXT PRIMARY KEY,
         deposit REAL NOT NULL DEFAULT 0,
@@ -571,6 +577,8 @@ const websimWorker = {
     try {
       if (method === "POST" && path === "/api/register") return await register(request, env);
       if (method === "POST" && path === "/api/login") return await login(request, env);
+      if (method === "POST" && path === "/api/password-recovery/request") return await requestPasswordRecovery(request, env);
+      if (method === "POST" && path === "/api/password-recovery/reset") return await resetPasswordWithOtp(request, env);
       if (method === "POST" && path === "/api/logout") return await logout(request, env);
       if (method === "GET" && path === "/api/me") return await me(request, env);
       if (method === "GET" && path === "/api/email-verification") return await getEmailVerification(request, env);
@@ -590,6 +598,8 @@ const websimWorker = {
       if (method === "POST" && path === "/api/invest") return await invest(request, env);
       if (method === "POST" && path === "/api/save-wallet") return await saveWallet(request, env);
       if (method === "POST" && path === "/api/settings") return await updateSettings(request, env);
+      if (method === "GET" && path === "/api/admin/operators") return await getAdminOperator(request, env);
+      if (method === "POST" && path === "/api/admin/operators") return await saveAdminOperator(request, env);
       if (method === "POST" && path === "/api/admin/login") return await adminLogin(request, env);
       if (method === "POST" && path === "/api/admin/logout") return await adminLogout(request, env);
       if (method === "GET" && path === "/api/admin/sync-users") return await adminSyncUsers(request, env);
@@ -664,6 +674,60 @@ async function login(request, env) {
   return Response.json({ ok: true, token });
 }
 
+function recoveryIdentifier(body) {
+  const value=typeof body?.identifier==="string"?body.identifier.trim().toLowerCase():"";
+  return value.length<=254?value:"";
+}
+async function findRecoveryAccount(env, identifier) {
+  if(!identifier) return null;
+  const row=await env.DB.prepare("SELECT u.id,u.username,u.identifier,u.email_verified,e.email AS verification_email,e.status AS verification_status FROM users u LEFT JOIN email_verifications e ON e.user_id=u.id WHERE lower(u.username)=? OR lower(u.identifier)=? LIMIT 1").bind(identifier,identifier).first();
+  if(!row) return null;
+  const valid=email=>typeof email==="string"&&/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const email=Number(row.email_verified)===1&&valid(row.verification_email)?row.verification_email.toLowerCase():valid(row.identifier)?row.identifier.toLowerCase():"";
+  return {...row,recovery_email:email};
+}
+async function requestPasswordRecovery(request,env) {
+  let body;try{body=await request.json();}catch{return bad("Inserisci il tuo account.");}
+  const identifier=recoveryIdentifier(body);
+  if(!identifier) return bad("Inserisci un identificativo valido.");
+  const account=await findRecoveryAccount(env,identifier);
+  // Return the same response for unknown accounts and accounts without a recoverable email.
+  if(!account?.recovery_email) return Response.json({ok:true});
+  const now=Date.now();
+  const previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
+  if(previous?.email===account.recovery_email&&previous.status==="code_sent"&&Number(previous.otp_expires||0)>now) return Response.json({ok:true});
+  if(previous?.email===account.recovery_email&&["pending","code_sent"].includes(previous.status)&&now-Number(previous.updated_at||0)<60000) return Response.json({ok:true});
+  await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(account.id,account.recovery_email,now,now).run();
+  const sent=await sendEmailOtp(env,{user_id:account.id,email:account.recovery_email,username:account.username});
+  if(!sent.ok){await env.DB.prepare("UPDATE email_verifications SET updated_at=? WHERE user_id=? AND status='pending'").bind(now-60000,account.id).run();return Response.json({error:sent.error},{status:sent.status});}
+  return Response.json({ok:true});
+}
+async function resetPasswordWithOtp(request,env) {
+  let body;try{body=await request.json();}catch{return bad("Dati di recupero non validi.");}
+  const identifier=recoveryIdentifier(body),code=String(body.code||"").trim(),next=typeof body.password==="string"?body.password:"";
+  if(!identifier) return bad("Inserisci un identificativo valido.");
+  if(!/^\d{6}$/.test(code)) return bad("Inserisci il codice OTP di 6 cifre.");
+  if(next.length<6||next.length>256) return bad("La nuova password deve contenere da 6 a 256 caratteri.");
+  const account=await findRecoveryAccount(env,identifier);
+  const invalid=()=>Response.json({error:"Codice OTP non valido o scaduto."},{status:400});
+  if(!account?.recovery_email) return invalid();
+  const row=await env.DB.prepare("SELECT email,status,otp_hash,otp_expires,attempts FROM email_verifications WHERE user_id=?").bind(account.id).first();
+  if(!row||row.email!==account.recovery_email||row.status!=="code_sent"||!row.otp_hash) return invalid();
+  const now=Date.now();
+  if(Number(row.otp_expires||0)<=now){await env.DB.prepare("UPDATE email_verifications SET status='expired',otp_hash=NULL,updated_at=? WHERE user_id=? AND status='code_sent'").bind(now,account.id).run();return invalid();}
+  const attempts=Number(row.attempts||0);
+  if(attempts>=5) return invalid();
+  const submitted=await hash(code,String(account.id)+":"+row.email);
+  if(submitted!==row.otp_hash){const nextAttempts=attempts+1;await env.DB.prepare("UPDATE email_verifications SET attempts=?,status=?,otp_hash=?,updated_at=? WHERE user_id=? AND status='code_sent' AND otp_hash=?").bind(nextAttempts,nextAttempts>=5?"expired":"code_sent",nextAttempts>=5?null:row.otp_hash,now,account.id,row.otp_hash).run();return invalid();}
+  const consumed=await env.DB.prepare("UPDATE email_verifications SET status='verified',otp_hash=NULL,otp_expires=NULL,attempts=0,updated_at=? WHERE user_id=? AND status='code_sent' AND otp_hash=? AND otp_expires>?").bind(now,account.id,row.otp_hash,now).run();
+  if(!consumed.meta?.changes) return invalid();
+  const salt=genSalt(),passwordHash=await hash(next,salt);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE users SET password_hash=?,salt=?,email_verified=1 WHERE id=?").bind(passwordHash,salt,account.id),
+    env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(account.id)
+  ]);
+  return Response.json({ok:true});
+}
 async function logout(request, env) {
   const h = (request.headers.get("x-session-token") || "").trim();
   if (h) await env.DB.prepare("DELETE FROM sessions WHERE token = ?").bind(h).run();
@@ -818,7 +882,8 @@ async function getDepositAddresses(request, env) {
   return Response.json({ addresses: Object.fromEntries(rows.map(row => [row.network, row.address])) });
 }
 async function getAdminDepositAddresses(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "wallets");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const rows = (await env.DB.prepare("SELECT network,address FROM platform_deposit_addresses").all()).results || [];
   return Response.json({ addresses: Object.fromEntries(rows.map(row => [row.network, row.address])) });
 }
@@ -829,7 +894,8 @@ function validWalletAddress(network, address) {
   return false;
 }
 async function saveAdminDepositAddresses(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "wallets");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const body = await request.json();
   const addresses = body.addresses || {};
   const networks = ['bep20', 'trc20'];
@@ -888,7 +954,8 @@ async function createAccountRequest(request, env) {
   }
 }
 async function reviewRental(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "compute-requests");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const body = await request.json();
   const id = Number(body.id);
   const status = body.status;
@@ -898,13 +965,16 @@ async function reviewRental(request, env) {
   return Response.json({ ok: true, id, status });
 }
 async function reviewAccountRequest(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await getAdminAccess(request, env);
+  if (!adminAccess) return Response.json({ error: "Accesso amministratore richiesto." }, { status: 403 });
   const body = await request.json();
   const id = Number(body.id);
   const decision = body.status;
   if (!Number.isInteger(id) || id < 1 || !['approved', 'rejected'].includes(decision)) return bad("Decisione non valida.");
   const req = await env.DB.prepare("SELECT id, user_id, kind, amount, status, review_key FROM account_requests WHERE id = ?").bind(id).first();
   if (!req || req.status !== 'pending') return Response.json({ error: "Richiesta non trovata o già gestita." }, { status: 409 });
+  const neededPermission = req.kind === "deposit" ? "deposit-requests" : "withdrawal-requests";
+  if (!adminAccess.owner && !adminAccess.permissions.includes(neededPermission)) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const now = Date.now();
   const reviewer = request.headers.get("x-websim-user-id");
   if (decision === 'rejected') {
@@ -1035,7 +1105,8 @@ async function restoreUserServer(request, env) {
   return Response.json(result);
 }
 async function setServerStatus(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "servers");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   let body;
   try { body = await request.json(); } catch { return bad("Stato server non valido."); }
   const purchaseId = typeof body.purchase_id === "string" ? body.purchase_id.trim() : "";
@@ -1087,19 +1158,21 @@ async function getEmailVerification(request, env) {
   return Response.json({ verified: !!user.email_verified, email: row?.email || (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.identifier) ? user.identifier : ""), status: row?.status || "none", created_at: row?.created_at || null, expires_at: row?.otp_expires || null });
 }
 async function requestEmailVerification(request, env) {
-  const user = await sessionUser(request, env);
-  if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
-  if (user.email_verified) return Response.json({ error: "Questo indirizzo email è già verificato." }, { status: 400 });
-  const body = await request.json();
-  const email = String(body.email || "").trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return Response.json({ error: "Inserisci un indirizzo email valido." }, { status: 400 });
-  const now = Date.now();
-  const previous = await env.DB.prepare("SELECT status,otp_expires FROM email_verifications WHERE user_id=?").bind(user.id).first();
-  if (previous?.status === "pending") return Response.json({ ok: true, status: "pending" });
-  if (previous?.status === "code_sent" && Number(previous.otp_expires || 0) > now) return Response.json({ ok: true, status: "code_sent" });
-  await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(user.id, email, now, now).run();
-  return Response.json({ ok: true, status: "pending" });
+  const user=await sessionUser(request,env);
+  if(!user) return Response.json({error:"Non autenticato."},{status:401});
+  if(user.email_verified) return Response.json({error:"Questo indirizzo email è già verificato."},{status:400});
+  let body;try{body=await request.json();}catch{return bad("Indirizzo email non valido.");}
+  const email=String(body.email||"").trim().toLowerCase();
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254) return bad("Inserisci un indirizzo email valido.");
+  const now=Date.now(), previous=await env.DB.prepare("SELECT status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(user.id).first();
+  if(previous?.status==="code_sent"&&Number(previous.otp_expires||0)>now) return Response.json({ok:true,status:"code_sent"});
+  if(previous?.status==="pending"&&now-Number(previous.updated_at||0)<60000) return Response.json({ok:true,status:"pending"});
+  await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(user.id,email,now,now).run();
+  const sent=await sendEmailOtp(env,{user_id:user.id,email,username:user.username});
+  if(!sent.ok){await env.DB.prepare("UPDATE email_verifications SET updated_at=? WHERE user_id=? AND status='pending'").bind(now-60000,user.id).run();return Response.json({error:sent.error},{status:sent.status});}
+  return Response.json({ok:true,status:"code_sent",expires_at:sent.expires_at});
 }
+
 async function verifyEmailCode(request, env) {
   const user = await sessionUser(request, env);
   if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
@@ -1128,23 +1201,33 @@ async function verifyEmailCode(request, env) {
   return Response.json({ ok: true, verified: true });
 }
 async function adminEmailVerifications(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "verification");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const rows = await env.DB.prepare("SELECT e.user_id AS id,e.email,e.status,e.created_at,e.otp_expires,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id ORDER BY e.created_at DESC LIMIT 500").all();
   return Response.json({ requests: rows.results || [] });
 }
+async function sendEmailOtp(env,row) {
+  const apiKey=String(env.RESEND_API_KEY||"").trim(),from=String(env.EMAIL_FROM||"").trim();
+  if(!apiKey||!from) return {ok:false,status:503,error:"Configura RESEND_API_KEY e EMAIL_FROM con un mittente del dominio verificato nelle variabili Render."};
+  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);
+  const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
+  let mail;
+  try { mail=await fetch("https://api.resend.com/emails",{method:"POST",headers:{"Authorization":"Bearer "+apiKey,"Content-Type":"application/json"},body:JSON.stringify({from,to:[row.email],subject:"Codice di sicurezza Nexa Compute",text:"Ciao "+row.username+",\n\nil tuo codice OTP Nexa Compute è: "+otp+"\n\nIl codice è valido per 15 minuti.\n\nNexa Compute"})}); }
+  catch(error){console.error("OTP email delivery failed",String(error));return {ok:false,status:502,error:"Invio email non riuscito. Verifica la connessione al servizio email."};}
+  if(!mail.ok){const detail=await mail.text();console.error("OTP email delivery failed",mail.status,detail.slice(0,500));return {ok:false,status:502,error:"Invio email non riuscito. Verifica il mittente e la configurazione del servizio email."};}
+  const otpHash=await hash(otp,String(row.user_id)+":"+row.email);
+  await env.DB.prepare("UPDATE email_verifications SET status='code_sent',otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=?").bind(otpHash,now+15*60*1000,now,row.user_id).run();
+  return {ok:true,expires_at:now+15*60*1000};
+}
 async function generateEmailOtp(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
-  const body = await request.json();
-  const userId = String(body.id || "");
-  const row = await env.DB.prepare("SELECT e.user_id,e.email,e.status,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id WHERE e.user_id=?").bind(userId).first();
-  if (!row || !["pending","code_sent"].includes(row.status)) return Response.json({ error: "Richiesta di verifica non disponibile." }, { status: 400 });
-  const bytes = new Uint32Array(1);
-  crypto.getRandomValues(bytes);
-  const otp = String(bytes[0] % 1000000).padStart(6, "0");
-  const now = Date.now();
-  const otpHash = await hash(otp, String(row.user_id) + ":" + row.email);
-  await env.DB.prepare("UPDATE email_verifications SET status='code_sent',otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=?").bind(otpHash, now + 15 * 60 * 1000, now, row.user_id).run();
-  return Response.json({ ok: true, email: row.email, username: row.username, otp, expires_at: now + 15 * 60 * 1000, sender: "info.cup9@yahoo.com" });
+  const access=await requireAdminPermission(request,env,"verification");
+  if(!access) return Response.json({error:"Permesso amministratore mancante."},{status:403});
+  const body=await request.json(), userId=String(body.id||"");
+  const row=await env.DB.prepare("SELECT e.user_id,e.email,e.status,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id WHERE e.user_id=?").bind(userId).first();
+  if(!row||!["pending","code_sent"].includes(row.status)) return bad("Richiesta di verifica non disponibile.");
+  const sent=await sendEmailOtp(env,row);
+  if(!sent.ok) return Response.json({error:sent.error},{status:sent.status});
+  return Response.json({ok:true,email:row.email,expires_at:sent.expires_at});
 }
 
 function isProjectOwner(request) {
@@ -1202,19 +1285,22 @@ async function closeSupportConversation(request, env) {
   return Response.json({ ok: true });
 }
 async function getSupportConversations(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "support");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const rows = await env.DB.prepare("SELECT account_id, account_username, MAX(id) AS last_id, MAX(created_at) AS updated_at FROM support_messages GROUP BY account_id, account_username ORDER BY last_id DESC LIMIT 100").all();
   return Response.json({ conversations: rows.results || [] });
 }
 async function getAdminSupportMessages(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "support");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const accountId = new URL(request.url).searchParams.get("account_id") || "";
   if (!accountId || accountId.length > 128) return bad("Conversazione non valida.");
   const rows = await env.DB.prepare("SELECT id, sender, body, created_at FROM support_messages WHERE account_id=? ORDER BY id DESC LIMIT 100").bind(accountId).all();
   return Response.json({ messages: (rows.results || []).reverse() });
 }
 async function replySupportMessage(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "support");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const ownerId = request.headers.get("x-websim-user-id");
   const body = await request.json();
   const accountId = typeof body.account_id === "string" ? body.account_id : "";
@@ -1226,13 +1312,54 @@ async function replySupportMessage(request, env) {
   await env.DB.prepare("INSERT INTO support_messages (user_id, account_id, account_username, sender, body, created_at) VALUES (?, ?, ?, 'admin', ?, ?)").bind(ownerId, accountId, conversation.account_username, message, Date.now()).run();
   return Response.json({ ok: true });
 }
-async function adminLogin(request) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accedi come proprietario del progetto Websim per aprire il pannello." }, { status: 403 });
-  return Response.json({ ok: true });
+const ADMIN_PERMISSIONS = ["overview","support","users","deposits","withdrawals","investments","wallets","verification","deposit-requests","withdrawal-requests","servers","compute-requests"];
+async function getAdminAccess(request, env) {
+  if (isProjectOwner(request)) return { owner: true, userId: request.headers.get("x-websim-user-id"), permissions: ADMIN_PERMISSIONS.slice() };
+  const user = await sessionUser(request, env);
+  if (!user) return null;
+  const row = await env.DB.prepare("SELECT permissions,enabled FROM admin_operators WHERE user_id=?").bind(user.id).first();
+  if (!row || Number(row.enabled) !== 1) return null;
+  let permissions=[];
+  try { const parsed=JSON.parse(row.permissions || "[]"); if (Array.isArray(parsed)) permissions=parsed.filter(value=>ADMIN_PERMISSIONS.includes(value)); } catch {}
+  return { owner:false, userId:user.id, permissions };
+}
+async function requireAdminPermission(request, env, permission) {
+  const access=await getAdminAccess(request,env);
+  return access && (access.owner || access.permissions.includes(permission)) ? access : null;
+}
+async function getAdminOperator(request, env) {
+  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status:403 });
+  const userId=new URL(request.url).searchParams.get("user_id") || "";
+  if (!userId || userId.length>128) return bad("Utente non valido.");
+  const user=await env.DB.prepare("SELECT id,username FROM users WHERE id=?").bind(userId).first();
+  if (!user) return Response.json({ error:"Utente non trovato." },{status:404});
+  const row=await env.DB.prepare("SELECT permissions,enabled FROM admin_operators WHERE user_id=?").bind(userId).first();
+  let permissions=[]; try { const parsed=JSON.parse(row?.permissions||"[]"); if(Array.isArray(parsed)) permissions=parsed.filter(value=>ADMIN_PERMISSIONS.includes(value)); } catch {}
+  return Response.json({ user, enabled:Number(row?.enabled||0)===1, permissions });
+}
+async function saveAdminOperator(request, env) {
+  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status:403 });
+  let body; try { body=await request.json(); } catch { return bad("Permessi operatore non validi."); }
+  const userId=typeof body.user_id==="string"?body.user_id.trim():"";
+  if(!userId || userId.length>128) return bad("Utente non valido.");
+  const user=await env.DB.prepare("SELECT id FROM users WHERE id=?").bind(userId).first();
+  if(!user) return Response.json({error:"Utente non trovato."},{status:404});
+  const enabled=body.enabled===true, raw=Array.isArray(body.permissions)?body.permissions:[];
+  const permissions=[...new Set(raw.filter(value=>ADMIN_PERMISSIONS.includes(value)))];
+  if(enabled && !permissions.length) return bad("Concedi almeno un permesso.");
+  if(!enabled) await env.DB.prepare("DELETE FROM admin_operators WHERE user_id=?").bind(userId).run();
+  else await env.DB.prepare("INSERT INTO admin_operators (user_id,permissions,enabled,updated_at) VALUES (?,?,1,?) ON CONFLICT(user_id) DO UPDATE SET permissions=excluded.permissions,enabled=1,updated_at=excluded.updated_at").bind(userId,JSON.stringify(permissions),Date.now()).run();
+  return Response.json({ok:true,enabled,permissions});
+}
+async function adminLogin(request, env) {
+  const access=await getAdminAccess(request,env);
+  if (!access) return Response.json({ error: "Accedi con un account operatore autorizzato o con l’account proprietario." }, { status:403 });
+  return Response.json({ ok:true, owner:access.owner, permissions:access.permissions });
 }
 async function adminLogout() { return Response.json({ ok: true }); }
 async function adminRequestCounts(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await getAdminAccess(request, env);
+  if (!adminAccess || (!adminAccess.owner && !adminAccess.permissions.length)) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const row = await env.DB.prepare(
     "SELECT " +
     "(SELECT COUNT(*) FROM account_requests WHERE kind='deposit' AND status='pending') AS deposit_requests, " +
@@ -1243,13 +1370,14 @@ async function adminRequestCounts(request, env) {
     "(SELECT COUNT(*) FROM (SELECT account_id, MAX(id) AS latest_id FROM support_messages GROUP BY account_id) latest " +
       "JOIN support_messages m ON m.id=latest.latest_id WHERE m.sender='user') AS support_messages"
   ).first();
+  const allowed=permission=>adminAccess.owner||adminAccess.permissions.includes(permission);
   return Response.json({ counts: {
-    depositRequests: Number(row?.deposit_requests || 0),
-    withdrawalRequests: Number(row?.withdrawal_requests || 0),
-    computeRequests: Number(row?.compute_requests || 0),
-    emailVerifications: Number(row?.email_verifications || 0),
-    servers: Number(row?.servers || 0),
-    support: Number(row?.support_messages || 0)
+    depositRequests: allowed("deposit-requests") ? Number(row?.deposit_requests || 0) : 0,
+    withdrawalRequests: allowed("withdrawal-requests") ? Number(row?.withdrawal_requests || 0) : 0,
+    computeRequests: allowed("compute-requests") ? Number(row?.compute_requests || 0) : 0,
+    emailVerifications: allowed("verification") ? Number(row?.email_verifications || 0) : 0,
+    servers: allowed("servers") ? Number(row?.servers || 0) : 0,
+    support: allowed("support") ? Number(row?.support_messages || 0) : 0
   }});
 }
 
@@ -1275,7 +1403,8 @@ async function adminSyncUsers(request, env) {
 }
 
 async function adminOverview(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await getAdminAccess(request, env);
+  if (!adminAccess || (!adminAccess.owner && !adminAccess.permissions.length)) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const [summary, users, deposits, withdrawals, investments, rentals, accountRequests, purchases] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS users, COALESCE(SUM(w.deposit),0) AS deposits_balance, COALESCE(SUM(w.earnings),0) AS earnings_balance, COALESCE(SUM(w.total_withdrawn),0) AS withdrawn FROM users u LEFT JOIN wallets w ON w.user_id = u.id").first(),
     env.DB.prepare("SELECT u.id, u.username, u.identifier, u.created_at, COALESCE(w.deposit,0) AS deposit, COALESCE(w.earnings,0) AS earnings, COALESCE(w.total_deposited,0) AS total_deposited, COALESCE(w.total_earned,0) AS total_earned, COALESCE(w.total_withdrawn,0) AS total_withdrawn FROM users u LEFT JOIN wallets w ON w.user_id = u.id ORDER BY u.created_at DESC").all(),
@@ -1286,13 +1415,18 @@ async function adminOverview(request, env) {
     env.DB.prepare("SELECT r.id, u.username, r.kind, r.amount, r.status, r.created_at, r.reviewed_at, r.network, r.tx_hash, r.withdrawal_address FROM account_requests r JOIN users u ON u.id = r.user_id ORDER BY r.created_at DESC").all(),
     env.DB.prepare("SELECT p.id AS purchase_id, p.product_id, p.price, p.purchased_at, u.username, s.status AS server_status FROM compute_purchases p JOIN users u ON u.id = p.user_id JOIN server_instances s ON s.purchase_id=p.id ORDER BY p.purchased_at DESC").all()
   ]);
+  if (!adminAccess.owner) {
+    const has=permission=>adminAccess.permissions.includes(permission);
+    return Response.json({ summary:has("overview")?summary:null, users:has("users")?users.results:[], deposits:has("deposits")?deposits.results:[], withdrawals:has("withdrawals")?withdrawals.results:[], investments:has("investments")?investments.results:[], rentals:has("compute-requests")?rentals.results:[], accountRequests:(accountRequests.results||[]).filter(row=>has(row.kind==="deposit"?"deposit-requests":"withdrawal-requests")), purchases:has("servers")?purchases.results:[] });
+  }
   return Response.json({ summary, users: users.results, deposits: deposits.results, withdrawals: withdrawals.results, investments: investments.results, rentals: rentals.results, accountRequests: accountRequests.results, purchases: purchases.results });
 }
 
 
 
 async function adminUserDetails(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "users");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   const id = new URL(request.url).searchParams.get("id") || "";
   if (!id || id.length > 128) return bad("Utente non valido.");
   const user = await env.DB.prepare("SELECT id,username,identifier,invite_code,referred_by,created_at,email_verified FROM users WHERE id=?").bind(id).first();
@@ -1317,7 +1451,8 @@ async function adminUserDetails(request, env) {
   return Response.json({ user, wallet: wallet || { deposit:0,earnings:0,total_deposited:0,total_earned:0,total_withdrawn:0 }, settings: settings || { withdraw_wallets:"{}",notifications:1 }, verification: verification || null, investments:investments.results||[], deposits:deposits.results||[], withdrawals:withdrawals.results||[], accountRequests:accountRequests.results||[], rentals:rentals.results||[], purchases:purchases.results||[], earningCredits:earningCredits.results||[], referralCommissions:referralCommissions.results||[], referrals:referrals.results||[], supportMessages:supportMessages.results||[], serverMaintenancePayments:serverMaintenancePayments.results||[], balanceAdjustments:balanceAdjustments.results||[] });
 }
 async function adminUpdateUser(request, env) {
-  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const adminAccess = await requireAdminPermission(request, env, "users");
+  if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
   let body;
   try { body = await request.json(); } catch { return bad("Dati utente non validi."); }
   const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -1405,7 +1540,7 @@ function makeD1Adapter(client) {
     }
   };
 }
-const env = { DB: makeD1Adapter(libsql), TURSO_DB_BOUND: true };
+const env = { DB: makeD1Adapter(libsql), TURSO_DB_BOUND: true, RESEND_API_KEY: process.env.RESEND_API_KEY, EMAIL_FROM: process.env.EMAIL_FROM };
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -1440,19 +1575,24 @@ function setAdminCookie(res, value, maxAge) {
   const secure = process.env.COOKIE_SECURE === 'false' ? '' : '; Secure';
   res.setHeader('Set-Cookie', ADMIN_COOKIE + '=' + value + '; Path=/; HttpOnly; SameSite=Strict; Max-Age=' + maxAge + secure);
 }
-app.post('/api/admin/login', (req, res) => {
-  const expectedUser = process.env.ADMIN_USERNAME || '';
-  const expectedPassword = process.env.ADMIN_PASSWORD || '';
-  if (!expectedUser || !expectedPassword) return res.status(503).json({ error: 'Configura ADMIN_USERNAME e ADMIN_PASSWORD nelle variabili ambiente Render.' });
-  if (!constantTimeEqual(req.body?.username, expectedUser) || !constantTimeEqual(req.body?.password, expectedPassword)) return res.status(401).json({ error: 'Credenziali amministratore non valide.' });
-  const payload = Buffer.from(JSON.stringify({ user: expectedUser, exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url');
-  setAdminCookie(res, payload + '.' + signAdmin(payload), 12 * 60 * 60);
-  return res.json({ ok: true });
+app.post('/api/admin/login', async (req, res) => {
+  const expectedUser = process.env.ADMIN_USERNAME || '', expectedPassword = process.env.ADMIN_PASSWORD || '';
+  if (expectedUser && expectedPassword && constantTimeEqual(req.body?.username, expectedUser) && constantTimeEqual(req.body?.password, expectedPassword)) {
+    const payload = Buffer.from(JSON.stringify({ user: expectedUser, exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url');
+    setAdminCookie(res, payload + '.' + signAdmin(payload), 12 * 60 * 60);
+    return res.json({ ok:true, owner:true, permissions:[] });
+  }
+  if (!req.headers['x-session-token']) return res.status(expectedUser && expectedPassword ? 401 : 503).json({ error:'Credenziali non valide: usa l’account operatore o configura ADMIN_USERNAME e ADMIN_PASSWORD.' });
+  try {
+    const origin=req.protocol+'://'+req.get('host'), headers=new Headers(); headers.set('content-type','application/json'); headers.set('x-session-token',String(req.headers['x-session-token']));
+    const response=await websimWorker.fetch(new Request(origin+req.originalUrl,{method:'POST',headers,body:JSON.stringify({})}),env);
+    res.status(response.status); response.headers.forEach((value,name)=>res.setHeader(name,value)); return res.send(Buffer.from(await response.arrayBuffer()));
+  } catch(error) { console.error('Render operator login failed:',error); return res.status(500).json({error:'Errore del server.'}); }
 });
 app.post('/api/admin/logout', (req, res) => { setAdminCookie(res, '', 0); return res.json({ ok: true }); });
 app.all('/api/*', async (req, res) => {
   const admin = isRenderAdmin(req);
-  if (req.path.startsWith('/api/admin/') && !['/api/admin/login', '/api/admin/logout'].includes(req.path) && !admin) return res.status(401).json({ error: 'Accesso riservato al proprietario del progetto.' });
+  if (req.path.startsWith('/api/admin/') && !['/api/admin/login', '/api/admin/logout'].includes(req.path) && !admin && !req.headers['x-session-token']) return res.status(401).json({ error: 'Accesso riservato al proprietario o a un operatore autorizzato.' });
   try {
     const headers = new Headers();
     for (const [name, value] of Object.entries(req.headers)) {

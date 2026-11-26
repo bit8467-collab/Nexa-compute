@@ -74,6 +74,24 @@
           <input class="auth-input" type="password" id="loginPass" autocomplete="current-password" placeholder="••••••••" required>
           <p class="auth-err" id="loginErr"></p>
           <button type="submit" class="btn-primary">Accedi →</button>
+          <button type="button" class="auth-recovery-link" id="forgotPasswordBtn">Password dimenticata?</button>
+        </form>
+        <form class="auth-form password-recovery" id="passwordRecovery" hidden autocomplete="off">
+          <h3>Recupera password</h3>
+          <label class="field-label" for="recoveryIdentifier">Email, telefono o nome utente</label>
+          <input class="auth-input" id="recoveryIdentifier" autocomplete="username" placeholder="es. nome@email.com o +39...">
+          <button type="button" class="btn-primary" id="requestRecoveryOtp">Invia codice OTP</button>
+          <div id="recoveryCodeFields" hidden>
+            <label class="field-label" for="recoveryOtp">Codice OTP di 6 cifre</label>
+            <input class="auth-input" id="recoveryOtp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456">
+            <label class="field-label" for="recoveryNewPassword">Nuova password</label>
+            <input class="auth-input" type="password" id="recoveryNewPassword" autocomplete="new-password">
+            <label class="field-label" for="recoveryConfirmPassword">Conferma nuova password</label>
+            <input class="auth-input" type="password" id="recoveryConfirmPassword" autocomplete="new-password">
+            <button type="button" class="btn-primary" id="resetPasswordOtp">Reimposta password</button>
+          </div>
+          <p class="auth-err" id="passwordRecoveryMessage" role="status"></p>
+          <button type="button" class="auth-recovery-link" id="passwordRecoveryBack">Torna al login</button>
         </form>
 
         <form class="auth-form" id="registerForm" autocomplete="off" hidden>
@@ -107,7 +125,7 @@
         <header class="admin-header"><div><span class="admin-mark">NX</span><div><b>Nexa Control</b><small>Pannello amministratore</small></div></div><a href="/" class="admin-exit">Esci</a></header>
         <div id="adminLoginView" class="admin-login">
           <p class="eyebrow">ACCESSO RISERVATO</p><h1>Controllo piattaforma</h1><p>Area riservata all’amministratore. Usa le credenziali configurate nelle variabili ambiente di Render.</p>
-          <form id="adminLoginForm"><p class="auth-err" id="adminError"></p><label class="field-label" for="adminUsername">Nome utente</label><input class="auth-input" id="adminUsername" autocomplete="username" required><label class="field-label" for="adminPassword">Password</label><input class="auth-input" type="password" id="adminPassword" autocomplete="current-password" required><button class="btn-primary" type="submit">Accedi al pannello</button><small>Credenziali configurate nelle variabili ambiente Render.</small></form>
+          <form id="adminLoginForm"><p class="auth-err" id="adminError"></p><label class="field-label" for="adminUsername">Nome utente</label><input class="auth-input" id="adminUsername" autocomplete="username" required><label class="field-label" for="adminPassword">Password</label><input class="auth-input" type="password" id="adminPassword" autocomplete="current-password" required><button class="btn-primary" type="submit">Accedi al pannello</button><small>Credenziali admin Render oppure account utente abilitato come operatore.</small></form>
           <small>Le credenziali admin sono verificate dal server: non inserirle nel codice sorgente.</small>
         </div>
 <div id="adminDashboard" class="admin-dashboard" hidden>
@@ -139,7 +157,7 @@
                 <section class="admin-chat-panel"><div class="admin-chat-heading"><div><h2>Chat assistenza</h2><p>Conversazioni degli utenti</p></div><button class="btn-mini" id="adminChatRefresh" type="button">Aggiorna chat</button></div><div class="admin-chat-layout"><div class="admin-chat-conversations" id="adminChatConversations"></div><section class="admin-chat-thread"><div class="admin-chat-messages" id="adminChatMessages"><p class="service-note">Seleziona una conversazione.</p></div><form id="adminChatForm" class="admin-chat-form"><textarea id="adminChatReply" maxlength="2000" placeholder="Scrivi una risposta…" required></textarea><button class="btn-primary" type="submit" id="adminChatSend">Invia risposta</button><p class="auth-err" id="adminChatError" role="status"></p></form></section></div></section>
               </section>
               <section class="admin-page" data-admin-page="users" hidden>
-                <div class="admin-page-head"><h1>Utenti</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Account</th><th>Identificativo</th><th>Creato</th><th>Saldo registrato</th><th>Prelevato registrato</th></tr></thead><tbody id="adminUsers"></tbody></table></div>
+                <div class="admin-page-head"><h1>Utenti</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Account</th><th>Identificativo</th><th>Creato</th><th>Saldo registrato</th><th>Prelevato registrato</th><th>Permessi operatore</th></tr></thead><tbody id="adminUsers"></tbody></table></div>
               </section>
               <section class="admin-page" data-admin-page="deposits" hidden>
                 <div class="admin-page-head"><h1>Depositi registrati</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Rete</th><th>Importo</th><th>Data</th></tr></thead><tbody id="adminDeposits"></tbody></table></div>
@@ -228,7 +246,7 @@
         <button class="nav-item" data-goto="profile"><span class="nav-icon">◉</span><span>Profilo</span></button>
       </nav>
       <button class="support-launcher" id="supportLauncher" type="button" aria-label="Apri chat con un operatore">💬</button><section class="support-chat" id="supportChat" hidden aria-label="Chat con un operatore"><header class="support-chat-header"><div><b>Chat con un operatore</b><small>Assistenza in tempo reale</small></div><button id="closeSupportChat" type="button" aria-label="Chiudi chat">×</button></header><button class="support-end-conversation" id="endSupportConversation" type="button" hidden>Chiudi definitivamente la conversazione</button><div class="support-chat-messages" id="supportChatMessages" aria-live="polite"></div><form class="support-chat-form" id="supportChatForm"><textarea id="supportMessageInput" maxlength="2000" placeholder="Scrivi un messaggio…" required></textarea><button id="supportSend" type="submit" aria-label="Invia messaggio">➤</button><p id="supportChatError" role="status"></p></form></section>
-      <section class="history-screen" id="emailVerifyScreen" hidden><header class="history-header"><button id="closeEmailVerification" aria-label="Chiudi verifica email">←</button><div><b>Verifica email</b><small>Conferma il tuo indirizzo email con un codice OTP</small></div></header><div class="history-content email-verify-content"><p class="history-note">La richiesta viene inoltrata all’amministratore. Riceverai il codice via email dopo l’invio manuale.</p><label class="field-label" for="verifyEmailInput">Indirizzo email</label><input class="auth-input" id="verifyEmailInput" type="email" autocomplete="email" placeholder="nome@email.com"><button class="btn-primary" id="requestEmailOtp" type="button">Richiedi verifica</button><p class="wallet-message" id="emailVerifyMessage" role="status"></p><div id="emailOtpEntry" hidden><label class="field-label" for="verifyOtpInput">Codice OTP</label><input class="auth-input" id="verifyOtpInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"><button class="btn-primary" id="submitEmailOtp" type="button">Verifica codice</button></div></div></section>
+      <section class="history-screen" id="emailVerifyScreen" hidden><header class="history-header"><button id="closeEmailVerification" aria-label="Chiudi verifica email">←</button><div><b>Verifica email</b><small>Conferma il tuo indirizzo email con un codice OTP</small></div></header><div class="history-content email-verify-content"><p class="history-note">Invieremo automaticamente un codice OTP a questo indirizzo email.</p><label class="field-label" for="verifyEmailInput">Indirizzo email</label><input class="auth-input" id="verifyEmailInput" type="email" autocomplete="email" placeholder="nome@email.com"><button class="btn-primary" id="requestEmailOtp" type="button">Richiedi verifica</button><p class="wallet-message" id="emailVerifyMessage" role="status"></p><div id="emailOtpEntry" hidden><label class="field-label" for="verifyOtpInput">Codice OTP</label><input class="auth-input" id="verifyOtpInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"><button class="btn-primary" id="submitEmailOtp" type="button">Verifica codice</button></div></div></section>
       <section class="history-screen" id="historyScreen" hidden>
         <header class="history-header"><button id="closeHistory" aria-label="Chiudi cronologia">←</button><div><b>Cronologia movimenti</b><small>Movimenti del tuo account</small></div></header>
         <div class="history-content">
