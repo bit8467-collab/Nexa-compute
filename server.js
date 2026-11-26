@@ -1,3 +1,159 @@
+const TURSO_DEFAULT_URL = "libsql://nexa-compute-nexa-compute.aws-us-west-2.turso.io";
+const TURSO_STMT = Symbol("turso-statement");
+
+function tursoEndpoint(connectionUrl) {
+  const raw = String(connectionUrl || TURSO_DEFAULT_URL).trim();
+  const normalized = raw.startsWith("libsql://") ? "https://" + raw.slice(9) : raw;
+  const parsed = new URL(normalized);
+  if (parsed.protocol !== "https:") throw new Error("TURSO_DATABASE_URL must use libsql:// or https://.");
+  const path = parsed.pathname.replace(new RegExp("/+$"), "");
+  return parsed.origin + path + (path.endsWith("/v2/pipeline") ? "" : "/v2/pipeline");
+}
+
+function splitSqlStatements(source) {
+  const statements = [];
+  let start = 0, quote = "", lineComment = false, blockComment = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i], next = source[i + 1];
+    if (lineComment) { if (ch.charCodeAt(0) === 10) lineComment = false; continue; }
+    if (blockComment) { if (ch === "*" && next === "/") { blockComment = false; i++; } continue; }
+    if (quote) {
+      if (quote !== "]" && ch === quote && next === quote) { i++; continue; }
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "-" && next === "-") { lineComment = true; i++; continue; }
+    if (ch === "/" && next === "*") { blockComment = true; i++; continue; }
+    if (ch === "'" || ch === '"' || ch.charCodeAt(0) === 96) { quote = ch; continue; }
+    if (ch === "[") { quote = "]"; continue; }
+    if (ch === ";") { const part = source.slice(start, i).trim(); if (part) statements.push(part); start = i + 1; }
+  }
+  const last = source.slice(start).trim();
+  if (last) statements.push(last);
+  return statements;
+}
+
+function tursoBytesBase64(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function tursoArgument(value) {
+  if (value == null) return { type: "null" };
+  if (typeof value === "boolean") return { type: "integer", value: value ? "1" : "0" };
+  if (typeof value === "bigint") return { type: "integer", value: String(value) };
+  if (typeof value === "number") return Number.isInteger(value) ? { type: "integer", value: String(value) } : { type: "float", value };
+  if (value instanceof ArrayBuffer) return { type: "blob", base64: tursoBytesBase64(new Uint8Array(value)) };
+  if (ArrayBuffer.isView(value)) return { type: "blob", base64: tursoBytesBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
+  return { type: "text", value: String(value) };
+}
+
+function tursoCell(cell) {
+  if (cell == null || typeof cell !== "object" || !("type" in cell)) return cell;
+  if (cell.type === "null") return null;
+  if (cell.type === "integer" || cell.type === "float") return Number(cell.value);
+  if (cell.type === "text") return cell.value;
+  if (cell.type === "blob") { const binary = atob(cell.base64 || ""); return Uint8Array.from(binary, ch => ch.charCodeAt(0)); }
+  return cell.value ?? null;
+}
+
+function tursoMeta(result) {
+  return {
+    duration: 0,
+    changes: Number(result?.affected_row_count || 0),
+    last_row_id: result?.last_insert_rowid == null ? null : Number(result.last_insert_rowid),
+    rows_read: Number(result?.rows_read || 0),
+    rows_written: Number(result?.rows_written || 0),
+  };
+}
+
+function tursoRows(result) {
+  const columns = result?.cols || [];
+  return (result?.rows || []).map(row => {
+    const object = {};
+    for (let i = 0; i < columns.length; i++) object[typeof columns[i] === "string" ? columns[i] : columns[i].name] = tursoCell(row[i]);
+    return object;
+  });
+}
+
+function tursoD1Result(result) {
+  return { results: tursoRows(result), success: true, meta: tursoMeta(result) };
+}
+
+function tursoStatement(sql, args = [], execute) {
+  const statement = {
+    bind(...values) { return tursoStatement(sql, values, execute); },
+    async all() { return tursoD1Result(await execute(sql, args)); },
+    async first(column) {
+      const result = await execute(sql, args);
+      const rows = result?.rows || [], columns = result?.cols || [];
+      if (!rows.length) return null;
+      const row = {};
+      for (let i = 0; i < columns.length; i++) row[typeof columns[i] === "string" ? columns[i] : columns[i].name] = tursoCell(rows[0][i]);
+      return column ? row[column] ?? null : row;
+    },
+    async run() { return tursoD1Result(await execute(sql, args)); },
+  };
+  Object.defineProperty(statement, TURSO_STMT, { value: { sql, args } });
+  return statement;
+}
+
+function createTursoD1(connectionUrl, authToken) {
+  const endpoint = tursoEndpoint(connectionUrl);
+  const token = String(authToken || "").trim();
+  async function send(request) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "authorization": "Bearer " + token, "content-type": "application/json" },
+      body: JSON.stringify({ requests: [request, { type: "close" }] }),
+    });
+    let payload;
+    try { payload = await response.json(); } catch { payload = null; }
+    if (!response.ok) throw new Error("Turso request failed (HTTP " + response.status + ").");
+    const first = payload?.results?.[0];
+    if (first?.type === "error") throw new Error(first.error?.message || "Turso query failed.");
+    if (!first?.response) throw new Error("Unexpected response from Turso.");
+    return first.response;
+  }
+  async function tursoExecute(sql, args = []) {
+    const response = await send({ type: "execute", stmt: { sql, args: args.map(tursoArgument) } });
+    if (response.type !== "execute" || !response.result) throw new Error("Unexpected Turso execute response.");
+    return response.result;
+  }
+  function preparedStatement(statement) {
+    const prepared = statement?.[TURSO_STMT];
+    if (!prepared) throw new Error("Invalid statement passed to Turso batch.");
+    return { sql: prepared.sql, args: prepared.args.map(tursoArgument) };
+  }
+  return {
+    prepare(sql) { return tursoStatement(String(sql), [], tursoExecute); },
+    async batch(statements) {
+      if (!statements.length) return [];
+      const steps = statements.map((statement, index) => {
+        const step = { stmt: preparedStatement(statement) };
+        if (index > 0) step.condition = { type: "ok" };
+        return step;
+      });
+      const response = await send({ type: "batch", batch: { steps } });
+      const batchResult = response.result || response.batch || response;
+      const results = batchResult.step_results || batchResult.results;
+      if (!Array.isArray(results)) throw new Error("Unexpected Turso batch response.");
+      return results.map(step => {
+        if (step?.type === "error" || step?.error) throw new Error(step.error?.message || "Turso batch failed.");
+        return tursoD1Result(step.result || step.response?.result || step);
+      });
+    },
+    async exec(sql) {
+      const statements = splitSqlStatements(String(sql)).map(text => tursoStatement(text, [], tursoExecute));
+      if (statements.length) await this.batch(statements);
+      return { count: statements.length, duration: 0 };
+    },
+  };
+}
+
 const DAY = 86400000;
 const PLANS = [
   { days: 10, rate: 1.0, min: 50 },
@@ -203,6 +359,18 @@ async function fullState(env, user) {
 
 const websimWorker = {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+      if (method === "GET" && path === "/api/pwa-manifest") return new Response(JSON.stringify({ name: "Nexa Compute", short_name: "Nexa", id: "/", start_url: "/", scope: "/", display: "standalone", background_color: "#0b1020", theme_color: "#0b1020", icons: [{ src: "/api/pwa-icon", sizes: "192x192", type: "image/svg+xml", purpose: "any" }, { src: "/api/pwa-icon", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }] }), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" } });
+      if (method === "GET" && path === "/api/pwa-icon") return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b1020"/><rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="#c39a46" stroke-width="10"/><text x="256" y="302" text-anchor="middle" font-family="Arial,sans-serif" font-size="190" font-weight="800" fill="#e8c876">NX</text></svg>`, { headers: { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
+      if (method === "GET" && path === "/api/pwa-worker") return new Response(`self.addEventListener("install",event=>event.waitUntil(self.skipWaiting()));self.addEventListener("activate",event=>event.waitUntil(self.clients.claim()));`, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/", "Cache-Control": "no-cache" } });
+    const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
+    if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
+    let tursoDB;
+    try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
+    catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
+    env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
     await env.DB.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -397,14 +565,8 @@ const websimWorker = {
     if (!requestColumns.some(column => column.name === "withdrawal_address")) await env.DB.prepare("ALTER TABLE account_requests ADD COLUMN withdrawal_address TEXT").run();
     await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS account_requests_tx_hash ON account_requests(tx_hash) WHERE tx_hash IS NOT NULL").run();
 
-    const url = new URL(request.url);
-    const path = url.pathname;
-    const method = request.method;
 
     try {
-      if (method === "GET" && path === "/api/pwa-manifest") return new Response(JSON.stringify({ name: "Nexa Compute", short_name: "Nexa", id: "/", start_url: "/", scope: "/", display: "standalone", background_color: "#0b1020", theme_color: "#0b1020", icons: [{ src: "/api/pwa-icon", sizes: "192x192", type: "image/svg+xml", purpose: "any" }, { src: "/api/pwa-icon", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }] }), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" } });
-      if (method === "GET" && path === "/api/pwa-icon") return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b1020"/><rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="#c39a46" stroke-width="10"/><text x="256" y="302" text-anchor="middle" font-family="Arial,sans-serif" font-size="190" font-weight="800" fill="#e8c876">NX</text></svg>`, { headers: { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
-      if (method === "GET" && path === "/api/pwa-worker") return new Response(`self.addEventListener("install",event=>event.waitUntil(self.skipWaiting()));self.addEventListener("activate",event=>event.waitUntil(self.clients.claim()));`, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/", "Cache-Control": "no-cache" } });
       if (method === "POST" && path === "/api/register") return await register(request, env);
       if (method === "POST" && path === "/api/login") return await login(request, env);
       if (method === "POST" && path === "/api/logout") return await logout(request, env);
@@ -1210,7 +1372,7 @@ import { fileURLToPath } from 'node:url';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const configuredDatabaseUrl = (process.env.TURSO_DATABASE_URL || '').trim();
-const databaseUrl = configuredDatabaseUrl || 'file:./nexa-render.db';
+const databaseUrl = configuredDatabaseUrl || 'libsql://nexa-compute-nexa-compute.aws-us-west-2.turso.io';
 const databaseToken = process.env.TURSO_AUTH_TOKEN || process.env.TURSO_DATABASE_AUTH_TOKEN;
 if (!databaseUrl.startsWith('file:') && !databaseToken) throw new Error('Configure TURSO_AUTH_TOKEN (or TURSO_DATABASE_AUTH_TOKEN) for the remote database.');
 const libsql = createClient({ url: databaseUrl, ...(databaseToken ? { authToken: databaseToken } : {}), intMode: 'number' });
