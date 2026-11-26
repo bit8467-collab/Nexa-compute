@@ -402,6 +402,9 @@ const websimWorker = {
     const method = request.method;
 
     try {
+      if (method === "GET" && path === "/api/pwa-manifest") return new Response(JSON.stringify({ name: "Nexa Compute", short_name: "Nexa", id: "/", start_url: "/", scope: "/", display: "standalone", background_color: "#0b1020", theme_color: "#0b1020", icons: [{ src: "/api/pwa-icon", sizes: "192x192", type: "image/svg+xml", purpose: "any" }, { src: "/api/pwa-icon", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }] }), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" } });
+      if (method === "GET" && path === "/api/pwa-icon") return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b1020"/><rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="#c39a46" stroke-width="10"/><text x="256" y="302" text-anchor="middle" font-family="Arial,sans-serif" font-size="190" font-weight="800" fill="#e8c876">NX</text></svg>`, { headers: { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
+      if (method === "GET" && path === "/api/pwa-worker") return new Response(`self.addEventListener("install",event=>event.waitUntil(self.skipWaiting()));self.addEventListener("activate",event=>event.waitUntil(self.clients.claim()));`, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/", "Cache-Control": "no-cache" } });
       if (method === "POST" && path === "/api/register") return await register(request, env);
       if (method === "POST" && path === "/api/login") return await login(request, env);
       if (method === "POST" && path === "/api/logout") return await logout(request, env);
@@ -425,6 +428,7 @@ const websimWorker = {
       if (method === "POST" && path === "/api/settings") return await updateSettings(request, env);
       if (method === "POST" && path === "/api/admin/login") return await adminLogin(request, env);
       if (method === "POST" && path === "/api/admin/logout") return await adminLogout(request, env);
+      if (method === "GET" && path === "/api/admin/sync-users") return await adminSyncUsers(request, env);
       if (method === "GET" && path === "/api/admin/request-counts") return await adminRequestCounts(request, env);
       if (method === "GET" && path === "/api/admin/user-details") return await adminUserDetails(request, env);
       if (method === "POST" && path === "/api/admin/update-user") return await adminUpdateUser(request, env);
@@ -1085,19 +1089,40 @@ async function adminRequestCounts(request, env) {
   }});
 }
 
+async function adminSyncUsers(request, env) {
+  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const rawCursor = new URL(request.url).searchParams.get("cursor") || "";
+  let cursorCreated = 0, cursorId = "";
+  if (rawCursor) {
+    const separator = rawCursor.indexOf("|");
+    cursorCreated = Number(rawCursor.slice(0, separator));
+    cursorId = separator >= 0 ? rawCursor.slice(separator + 1) : "";
+    if (separator < 0 || !Number.isSafeInteger(cursorCreated) || cursorCreated < 0 || cursorId.length > 128) return bad("Cursore di sincronizzazione non valido.");
+  }
+  const rows = (await env.DB.prepare("SELECT id,created_at FROM users WHERE created_at>? OR (created_at=? AND id>?) ORDER BY created_at,id LIMIT 4").bind(cursorCreated, cursorCreated, cursorId).all()).results || [];
+  for (const user of rows) {
+    await accrue(env, user.id);
+    await accrueServerEarnings(env, user.id);
+    await accrueReferralNetwork(env, user.id);
+  }
+  const last = rows[rows.length - 1];
+  const nextCursor = last ? String(last.created_at) + "|" + last.id : rawCursor;
+  return Response.json({ next_cursor: nextCursor, done: rows.length < 4, processed: rows.length });
+}
+
 async function adminOverview(request, env) {
   if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
   const [summary, users, deposits, withdrawals, investments, rentals, accountRequests, purchases] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS users, COALESCE(SUM(w.deposit),0) AS deposits_balance, COALESCE(SUM(w.earnings),0) AS earnings_balance, COALESCE(SUM(w.total_withdrawn),0) AS withdrawn FROM users u LEFT JOIN wallets w ON w.user_id = u.id").first(),
     env.DB.prepare("SELECT u.id, u.username, u.identifier, u.created_at, COALESCE(w.deposit,0) AS deposit, COALESCE(w.earnings,0) AS earnings, COALESCE(w.total_deposited,0) AS total_deposited, COALESCE(w.total_earned,0) AS total_earned, COALESCE(w.total_withdrawn,0) AS total_withdrawn FROM users u LEFT JOIN wallets w ON w.user_id = u.id ORDER BY u.created_at DESC").all(),
-    env.DB.prepare("SELECT u.username, d.amount, d.net, d.date FROM deposits d JOIN users u ON u.id = d.user_id ORDER BY d.date DESC LIMIT 1000").all(),
-    env.DB.prepare("SELECT u.username, w.amount, w.net, w.date FROM withdrawals w JOIN users u ON u.id = w.user_id ORDER BY w.date DESC LIMIT 1000").all(),
-    env.DB.prepare("SELECT u.username, i.amount, i.days, i.rate, i.created, i.credited, i.active FROM investments i JOIN users u ON u.id = i.user_id ORDER BY i.created DESC LIMIT 1000").all(),
-    env.DB.prepare("SELECT r.id, u.username, r.product_id, r.status, r.created_at FROM compute_rentals r JOIN users u ON u.id = r.user_id ORDER BY r.created_at DESC LIMIT 1000").all(),
-    env.DB.prepare("SELECT r.id, u.username, r.kind, r.amount, r.status, r.created_at, r.reviewed_at, r.network, r.tx_hash, r.withdrawal_address FROM account_requests r JOIN users u ON u.id = r.user_id ORDER BY r.created_at DESC LIMIT 1000").all(),
-    env.DB.prepare("SELECT p.id AS purchase_id, p.product_id, p.price, p.purchased_at, u.username, s.status AS server_status FROM compute_purchases p JOIN users u ON u.id = p.user_id JOIN server_instances s ON s.purchase_id=p.id ORDER BY p.purchased_at DESC LIMIT 1000").all()
+    env.DB.prepare("SELECT u.username, d.amount, d.net, d.date FROM deposits d JOIN users u ON u.id = d.user_id ORDER BY d.date DESC").all(),
+    env.DB.prepare("SELECT u.username, w.amount, w.net, w.date FROM withdrawals w JOIN users u ON u.id = w.user_id ORDER BY w.date DESC").all(),
+    env.DB.prepare("SELECT u.username, i.amount, i.days, i.rate, i.created, i.credited, i.active FROM investments i JOIN users u ON u.id = i.user_id ORDER BY i.created DESC").all(),
+    env.DB.prepare("SELECT r.id, u.username, r.product_id, r.status, r.created_at FROM compute_rentals r JOIN users u ON u.id = r.user_id ORDER BY r.created_at DESC").all(),
+    env.DB.prepare("SELECT r.id, u.username, r.kind, r.amount, r.status, r.created_at, r.reviewed_at, r.network, r.tx_hash, r.withdrawal_address FROM account_requests r JOIN users u ON u.id = r.user_id ORDER BY r.created_at DESC").all(),
+    env.DB.prepare("SELECT p.id AS purchase_id, p.product_id, p.price, p.purchased_at, u.username, s.status AS server_status FROM compute_purchases p JOIN users u ON u.id = p.user_id JOIN server_instances s ON s.purchase_id=p.id ORDER BY p.purchased_at DESC").all()
   ]);
-  return Response.json({ summary, users: users.results, deposits: deposits.results, withdrawals: withdrawals.results, investments: investments.results, rentals: rentals.results, accountRequests: accountRequests.results, purchases: purchases.results, records_limited: 1000 });
+  return Response.json({ summary, users: users.results, deposits: deposits.results, withdrawals: withdrawals.results, investments: investments.results, rentals: rentals.results, accountRequests: accountRequests.results, purchases: purchases.results });
 }
 
 

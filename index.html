@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0b1020">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Nexa Compute">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/api/pwa-manifest">
   <title>Nexa Compute</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
@@ -55,6 +59,7 @@
           <button type="submit" class="btn-primary">Registrati →</button>
         </form>
 
+        <button class="btn-mini app-install-button" type="button" data-install-app hidden>Installa app</button>
         <p class="auth-msg" id="authMsg" hidden></p>
       </div>
     </div>
@@ -88,7 +93,7 @@
               <button class="admin-logout" id="adminLogout" type="button">Esci dal pannello</button>
             </aside>
             <main class="admin-main" id="adminMain">
-              <div class="admin-main-toolbar"><div class="admin-alert-summary" role="status" aria-live="polite"><span class="admin-alert-dot" aria-hidden="true"></span><span>Richieste aperte</span><b class="admin-total-badge" id="adminTotalBadge" hidden>0</b></div><button class="btn-mini" id="adminRefresh" type="button">Aggiorna</button></div><div class="admin-feedback"><p class="auth-err" id="adminDataError" role="status"></p></div>
+              <div class="admin-main-toolbar"><div class="admin-alert-summary" role="status" aria-live="polite"><span class="admin-alert-dot" aria-hidden="true"></span><span>Richieste aperte</span><b class="admin-total-badge" id="adminTotalBadge" hidden>0</b></div><div class="admin-refresh-controls"><label for="adminRefreshInterval">Aggiornamento automatico</label><select id="adminRefreshInterval" aria-label="Intervallo aggiornamento automatico"><option value="30000">30 secondi</option><option value="60000" selected>1 minuto</option><option value="300000">5 minuti</option><option value="900000">15 minuti</option><option value="0">Disattivato</option></select></div><button class="btn-mini" id="adminRefresh" type="button">Aggiorna</button></div><div class="admin-feedback"><p class="auth-err" id="adminDataError" role="status"></p></div>
               <section class="admin-page active" data-admin-page="overview">
                 <div class="admin-page-head"><div><p class="eyebrow">PANORAMICA</p><h1>Controllo piattaforma</h1></div></div><p class="admin-warning" id="adminDataWarning">Vista amministrativa in sola lettura.</p><div class="admin-metrics" id="adminMetrics"></div>
               </section>
@@ -141,7 +146,7 @@
     <div class="appbody" id="appBody" hidden>
       <header class="appbar">
         <div class="brand"><span class="logo">NX</span><div><span class="brand-name">Nexa Compute</span><span class="brand-sub">Calcolo on demand</span></div></div>
-        <div class="appbar-right"><span class="user-pill"><img id="appbarAvatar" src="" alt=""><span id="barUser">…</span></span><button class="menu-trigger" id="menuTrigger" aria-label="Apri menu" aria-expanded="false">⋯</button><div class="quick-menu" id="quickMenu" hidden><label class="quick-menu-label" for="languageSelect">Lingua interfaccia</label><select id="languageSelect" class="quick-select" aria-label="Lingua interfaccia"><option value="it">Italiano</option><option value="en">English</option></select><button class="quick-menu-item" id="openInbox">✉ <span>Posta in arrivo</span><i class="inbox-count" id="inboxMessageBadge" hidden>0</i><b>›</b></button><button class="quick-menu-item" id="platformSettings">⚙ <span>Impostazioni piattaforma</span><b>›</b></button><button class="quick-menu-item" id="themeToggle">◐ <span>Modalità giorno</span><b id="themeState">●</b></button><button class="quick-menu-item" id="aboutButton">✦ <span>About us</span><b>›</b></button><button class="quick-menu-item" id="contactButton">✉ <span>Contact us</span><b>›</b></button></div></div>
+        <div class="appbar-right"><span class="user-pill"><img id="appbarAvatar" src="" alt=""><span id="barUser">…</span></span><button class="menu-trigger" id="menuTrigger" aria-label="Apri menu" aria-expanded="false">⋯</button><div class="quick-menu" id="quickMenu" hidden><label class="quick-menu-label" for="languageSelect">Lingua interfaccia</label><select id="languageSelect" class="quick-select" aria-label="Lingua interfaccia"><option value="it">Italiano</option><option value="en">English</option></select><button class="quick-menu-item" id="openInbox">✉ <span>Posta in arrivo</span><i class="inbox-count" id="inboxMessageBadge" hidden>0</i><b>›</b></button><button class="quick-menu-item app-install-button" type="button" data-install-app hidden>⇩ <span>Installa app</span><b>›</b></button><button class="quick-menu-item" id="platformSettings">⚙ <span>Impostazioni piattaforma</span><b>›</b></button><button class="quick-menu-item" id="themeToggle">◐ <span>Modalità giorno</span><b id="themeState">●</b></button><button class="quick-menu-item" id="aboutButton">✦ <span>About us</span><b>›</b></button><button class="quick-menu-item" id="contactButton">✉ <span>Contact us</span><b>›</b></button></div></div>
       </header>
       <main class="screen">
         <section class="view active" id="view-home">
