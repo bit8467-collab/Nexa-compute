@@ -842,3 +842,25 @@ body[data-theme="light"] .admin-page-head h1{color:#25332d}body[data-theme="ligh
 body[data-theme="light"] .admin-table-wrap th{background:#f1eee5;color:#765c2a}body[data-theme="light"] .admin-table-wrap td{color:#34453c;border-top-color:#dfe5df}body[data-theme="light"] .admin-table-wrap tr:hover td{background:#c8a96012}
 
 
+
+/* Requested presentation layout: compact single-line heading above the company image. */
+.landing-hero{width:min(100%,1160px);min-height:0;padding:30px 0 48px;display:flex;flex-direction:column;align-items:stretch;gap:16px}
+.landing-hero>.landing-kicker{margin:0}
+.landing-hero h1{max-width:none;font-size:clamp(15px,3.15vw,36px);line-height:1.15;letter-spacing:-.045em;white-space:nowrap}
+.landing-visual{width:100%;min-height:0;height:auto;aspect-ratio:2/1;max-height:520px;border-radius:12px}
+.landing-hero-copy{max-width:720px}
+.landing-hero-copy .landing-lede{margin-top:3px}
+.landing-hero-copy .landing-caption{margin-top:16px}
+@media(max-width:620px){.landing-hero{padding:25px 0 36px;gap:13px}.landing-hero h1{font-size:clamp(15px,4.1vw,25px)}.landing-visual{aspect-ratio:1.4;min-height:220px;max-height:320px;border-radius:10px}}
+
+/* GPU value explainer */
+.landing-profit{padding:58px 0 62px;border-top:1px solid #ffffff15}
+.landing-profit-heading{max-width:740px;margin-bottom:20px}
+.landing-profit-details{max-width:860px;border-top:1px solid #ffffff1a}
+.landing-profit details{border-bottom:1px solid #ffffff1a}
+.landing-profit summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 3px;color:#e8dfc2;font-size:13px;font-weight:650;line-height:1.45;cursor:pointer;list-style:none}
+.landing-profit summary::-webkit-details-marker{display:none}
+.landing-profit summary::after{content:'+';flex:0 0 auto;color:var(--lp-gold);font-size:20px;font-weight:400;line-height:1}
+.landing-profit details[open] summary::after{content:'−'}
+.landing-profit details>p{max-width:790px;margin:0;padding:0 30px 17px 3px;color:#aab5bf;font-size:12px;line-height:1.8}
+@media(max-width:620px){.landing-profit{padding:43px 0 48px}.landing-profit-heading{margin-bottom:14px}.landing-profit summary{padding:14px 2px;font-size:12px}.landing-profit details>p{padding:0 18px 15px 2px;font-size:11px;line-height:1.75}}
