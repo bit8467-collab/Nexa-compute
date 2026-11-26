@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#0b1020">
   <title>Nexa Compute</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -37,7 +38,7 @@
           <label class="field-label">Email o numero di telefono</label>
           <input class="auth-input" id="regId" placeholder="es. nome@email.com o +39..." required>
           <label class="field-label">Nome utente (user)</label>
-          <input class="auth-input" id="regUser" placeholder="es. marco90" required>
+          <input class="auth-input" id="regUser" autocomplete="username" placeholder="es. marco90" required>
           <div class="two">
 <div>
                   <label class="field-label" for="regPass">Password</label>
@@ -66,20 +67,66 @@
           <form id="adminLoginForm"><p class="auth-err" id="adminError"></p><label class="field-label" for="adminUsername">Nome utente</label><input class="auth-input" id="adminUsername" autocomplete="username" required><label class="field-label" for="adminPassword">Password</label><input class="auth-input" type="password" id="adminPassword" autocomplete="current-password" required><button class="btn-primary" type="submit">Accedi al pannello</button><small>Credenziali configurate nelle variabili ambiente Render.</small></form>
           <small>Le credenziali admin sono verificate dal server: non inserirle nel codice sorgente.</small>
         </div>
-        <div id="adminDashboard" hidden>
-          <div class="admin-title"><div><p class="eyebrow">PANORAMICA</p><h1>Controllo piattaforma</h1></div><button class="btn-mini" id="adminRefresh">Aggiorna</button></div>
-          <p class="admin-warning" id="adminDataWarning">Vista amministrativa in sola lettura.</p><p class="auth-err" id="adminDataError"></p>
-          <div class="admin-metrics" id="adminMetrics"></div>
-          <section class="admin-chat-panel"><div class="admin-chat-heading"><div><h2>Chat assistenza</h2><p>Conversazioni degli utenti</p></div><button class="btn-mini" id="adminChatRefresh" type="button">Aggiorna chat</button></div><div class="admin-chat-layout"><div class="admin-chat-conversations" id="adminChatConversations"></div><section class="admin-chat-thread"><div class="admin-chat-messages" id="adminChatMessages"><p class="service-note">Seleziona una conversazione.</p></div><form id="adminChatForm" class="admin-chat-form"><textarea id="adminChatReply" maxlength="2000" placeholder="Scrivi una risposta…" required></textarea><button class="btn-primary" type="submit" id="adminChatSend">Invia risposta</button><p class="auth-err" id="adminChatError" role="status"></p></form></section></div></section>
-          <h2>Utenti</h2><div class="admin-table-wrap"><table><thead><tr><th>Account</th><th>Identificativo</th><th>Creato</th><th>Saldo registrato</th><th>Prelevato registrato</th></tr></thead><tbody id="adminUsers"></tbody></table></div>
-          <h2>Depositi registrati</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Rete</th><th>Importo</th><th>Data</th></tr></thead><tbody id="adminDeposits"></tbody></table></div>
-          <h2>Prelievi registrati</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Rete</th><th>Importo</th><th>Data</th></tr></thead><tbody id="adminWithdrawals"></tbody></table></div>
-          <h2>Posizioni registrate</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Durata</th><th>Stato</th></tr></thead><tbody id="adminInvestments"></tbody></table></div>
-          <h2>Indirizzi di deposito USDT</h2><div class="card-block admin-wallet-config"><label class="field-label" for="adminBep20Address">BNB Smart Chain · BEP20</label><input class="auth-input" id="adminBep20Address" autocomplete="off" placeholder="Indirizzo USDT BEP20"><label class="field-label" for="adminTrc20Address">TRON · TRC20</label><input class="auth-input" id="adminTrc20Address" autocomplete="off" placeholder="Indirizzo USDT TRC20"><button class="btn-primary" id="adminSaveDepositAddresses" type="button">Salva indirizzi</button><p class="wallet-message" id="adminWalletMessage" role="status"></p></div>
-          <h2>Verifica email</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Destinatario</th><th>Stato</th><th>Richiesta</th><th>Azione</th></tr></thead><tbody id="adminEmailVerifications"></tbody></table></div><h2>Richieste depositi</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Rete / TXHash</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminDepositRequests"></tbody></table></div><h2>Richieste prelievi</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Rete / indirizzo</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminWithdrawalRequests"></tbody></table></div>
-          <h2>Server acquistati · stato manuale</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Modello</th><th>Importo</th><th>Stato</th><th>Data</th><th>Azione</th></tr></thead><tbody id="adminPurchases"></tbody></table></div>
-          <h2>Richieste compute</h2><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Configurazione</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminRentals"></tbody></table></div>
-          <button class="btn-primary admin-logout" id="adminLogout">Esci dal pannello</button>
+<div id="adminDashboard" class="admin-dashboard" hidden>
+          <div class="admin-layout">
+            <aside class="admin-sidebar" aria-label="Sezioni amministrazione">
+              <p class="admin-sidebar-label">SEZIONI</p>
+              <nav class="admin-navigation">
+                <button type="button" class="admin-nav-item active" data-admin-section="overview" aria-current="page"><span class="admin-nav-icon" aria-hidden="true">◫</span><span>Panoramica</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="support"><span class="admin-nav-icon" aria-hidden="true">◌</span><span>Chat assistenza</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="users"><span class="admin-nav-icon" aria-hidden="true">♙</span><span>Utenti</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="deposits"><span class="admin-nav-icon" aria-hidden="true">↓</span><span>Depositi registrati</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="withdrawals"><span class="admin-nav-icon" aria-hidden="true">↑</span><span>Prelievi registrati</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="investments"><span class="admin-nav-icon" aria-hidden="true">▤</span><span>Posizioni registrate</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="wallets"><span class="admin-nav-icon" aria-hidden="true">⌁</span><span>Indirizzi di deposito USDT</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="verification"><span class="admin-nav-icon" aria-hidden="true">✉</span><span>Verifica email</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="deposit-requests"><span class="admin-nav-icon" aria-hidden="true">⇩</span><span>Richieste depositi</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="withdrawal-requests"><span class="admin-nav-icon" aria-hidden="true">⇧</span><span>Richieste prelievi</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="servers"><span class="admin-nav-icon" aria-hidden="true">▣</span><span>Server acquistati · stato manuale</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="compute-requests"><span class="admin-nav-icon" aria-hidden="true">⌘</span><span>Richieste compute</span></button>
+              </nav>
+              <button class="admin-logout" id="adminLogout" type="button">Esci dal pannello</button>
+            </aside>
+            <main class="admin-main" id="adminMain">
+              <div class="admin-main-toolbar"><button class="btn-mini" id="adminRefresh" type="button">Aggiorna</button></div><div class="admin-feedback"><p class="auth-err" id="adminDataError" role="status"></p></div>
+              <section class="admin-page active" data-admin-page="overview">
+                <div class="admin-page-head"><div><p class="eyebrow">PANORAMICA</p><h1>Controllo piattaforma</h1></div></div><p class="admin-warning" id="adminDataWarning">Vista amministrativa in sola lettura.</p><div class="admin-metrics" id="adminMetrics"></div>
+              </section>
+              <section class="admin-page" data-admin-page="support" hidden>
+                <section class="admin-chat-panel"><div class="admin-chat-heading"><div><h2>Chat assistenza</h2><p>Conversazioni degli utenti</p></div><button class="btn-mini" id="adminChatRefresh" type="button">Aggiorna chat</button></div><div class="admin-chat-layout"><div class="admin-chat-conversations" id="adminChatConversations"></div><section class="admin-chat-thread"><div class="admin-chat-messages" id="adminChatMessages"><p class="service-note">Seleziona una conversazione.</p></div><form id="adminChatForm" class="admin-chat-form"><textarea id="adminChatReply" maxlength="2000" placeholder="Scrivi una risposta…" required></textarea><button class="btn-primary" type="submit" id="adminChatSend">Invia risposta</button><p class="auth-err" id="adminChatError" role="status"></p></form></section></div></section>
+              </section>
+              <section class="admin-page" data-admin-page="users" hidden>
+                <div class="admin-page-head"><h1>Utenti</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Account</th><th>Identificativo</th><th>Creato</th><th>Saldo registrato</th><th>Prelevato registrato</th></tr></thead><tbody id="adminUsers"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="deposits" hidden>
+                <div class="admin-page-head"><h1>Depositi registrati</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Rete</th><th>Importo</th><th>Data</th></tr></thead><tbody id="adminDeposits"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="withdrawals" hidden>
+                <div class="admin-page-head"><h1>Prelievi registrati</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Rete</th><th>Importo</th><th>Data</th></tr></thead><tbody id="adminWithdrawals"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="investments" hidden>
+                <div class="admin-page-head"><h1>Posizioni registrate</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Durata</th><th>Stato</th></tr></thead><tbody id="adminInvestments"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="wallets" hidden>
+                <div class="admin-page-head"><h1>Indirizzi di deposito USDT</h1></div><div class="card-block admin-wallet-config"><label class="field-label" for="adminBep20Address">BNB Smart Chain · BEP20</label><input class="auth-input" id="adminBep20Address" autocomplete="off" placeholder="Indirizzo USDT BEP20"><label class="field-label" for="adminTrc20Address">TRON · TRC20</label><input class="auth-input" id="adminTrc20Address" autocomplete="off" placeholder="Indirizzo USDT TRC20"><button class="btn-primary" id="adminSaveDepositAddresses" type="button">Salva indirizzi</button><p class="wallet-message" id="adminWalletMessage" role="status"></p></div>
+              </section>
+              <section class="admin-page" data-admin-page="verification" hidden>
+                <div class="admin-page-head"><h1>Verifica email</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Destinatario</th><th>Stato</th><th>Richiesta</th><th>Azione</th></tr></thead><tbody id="adminEmailVerifications"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="deposit-requests" hidden>
+                <div class="admin-page-head"><h1>Richieste depositi</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Rete / TXHash</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminDepositRequests"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="withdrawal-requests" hidden>
+                <div class="admin-page-head"><h1>Richieste prelievi</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Importo</th><th>Rete / indirizzo</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminWithdrawalRequests"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="servers" hidden>
+                <div class="admin-page-head"><h1>Server acquistati · stato manuale</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Modello</th><th>Importo</th><th>Stato</th><th>Data</th><th>Azione</th></tr></thead><tbody id="adminPurchases"></tbody></table></div>
+              </section>
+              <section class="admin-page" data-admin-page="compute-requests" hidden>
+                <div class="admin-page-head"><h1>Richieste compute</h1></div><div class="admin-table-wrap"><table><thead><tr><th>Utente</th><th>Configurazione</th><th>Stato</th><th>Data</th><th>Decisione</th></tr></thead><tbody id="adminRentals"></tbody></table></div>
+              </section>
+            </main>
+          </div>
         </div>
       </div>
     </section>
@@ -117,7 +164,7 @@
           <button class="mini-card email-verify-open" id="openEmailVerification" type="button"><span class="mc-icon">✉</span><div><b>Verifica email</b><small id="emailVerificationSummary">Conferma il tuo indirizzo email</small></div><span class="mc-arrow">→</span></button>
           <div class="menu">
             <div class="menu-row acc-row" data-panel="pwPanel"><span>🔒</span><div class="acc-text"><b>Modifica password</b><small>Aggiorna la password del tuo account</small></div><span class="mc-arrow">›</span></div>
-            <div class="panel" id="pwPanel" hidden><label class="field-label">Password attuale</label><input class="auth-input" type="password" id="pwCur" autocomplete="current-password"><label class="field-label">Nuova password</label><input class="auth-input" type="password" id="pwNew" autocomplete="new-password"><label class="field-label">Conferma nuova password</label><input class="auth-input" type="password" id="pwNew2" autocomplete="new-password"><p class="panel-msg" id="pwMsg"></p><button class="btn-primary" id="pwSave">Aggiorna password</button></div>
+            <form class="panel" id="pwPanel" autocomplete="off" hidden><input type="text" name="username" autocomplete="username" hidden><label class="field-label">Password attuale</label><input class="auth-input" type="password" id="pwCur" autocomplete="current-password"><label class="field-label">Nuova password</label><input class="auth-input" type="password" id="pwNew" autocomplete="new-password"><label class="field-label">Conferma nuova password</label><input class="auth-input" type="password" id="pwNew2" autocomplete="new-password"><p class="panel-msg" id="pwMsg"></p><button type="button" class="btn-primary" id="pwSave">Aggiorna password</button></form>
             <div class="menu-row" id="logoutBtn"><span>↪</span> Esci dall'account</div>
           </div>
           <p class="service-note">Le credenziali sono gestite dal servizio account del progetto. Non inserire seed phrase o chiavi private: Nexa Compute non le richiede.</p>
