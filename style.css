@@ -634,3 +634,15 @@ body[data-theme="light"] .support-chat{background:var(--panel);border-color:#c6a
 @media(max-width:480px){.admin-header{height:60px;flex-basis:60px}.admin-header>div{gap:9px}.admin-mark{width:36px;height:36px}.admin-header b{font-size:13px}.admin-header small{font-size:10px}.admin-exit{padding:8px 9px;font-size:11px}.admin-dashboard{min-height:calc(100dvh - 60px)}.admin-layout{min-height:calc(100dvh - 60px)}.admin-sidebar{padding-right:8px;padding-left:8px}.admin-nav-item{font-size:11px}.admin-main{padding-right:12px;padding-left:12px}.admin-metrics{gap:8px}.admin-metric{min-height:92px;padding:13px}.admin-metric b{font-size:19px}.admin-chat-panel{padding:12px}.admin-page-head{margin-bottom:14px}}
 
 .admin-main-toolbar{width:100%;max-width:1480px;margin:0 auto 12px;display:flex;justify-content:flex-end}.admin-main-toolbar .btn-mini{min-width:108px}
+
+
+.admin-main-toolbar{justify-content:space-between;align-items:center;gap:14px}
+.admin-alert-summary{display:flex;align-items:center;gap:9px;color:#aab7ca;font-size:12px;font-weight:700}
+.admin-alert-dot{width:8px;height:8px;border-radius:50%;background:#64748b;box-shadow:0 0 0 4px #64748b18}
+.admin-alert-summary.has-alert .admin-alert-dot{background:#f1bd5e;box-shadow:0 0 0 4px #f1bd5e20}
+.admin-nav-badge,.admin-total-badge{min-width:21px;height:21px;padding:0 6px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#d64d60;color:#fff;font-size:10px;font-weight:900;line-height:1;white-space:nowrap}
+.admin-nav-badge{margin-left:auto;flex:0 0 auto}
+.admin-total-badge{min-width:23px;height:23px;font-size:11px}
+.admin-nav-badge[hidden],.admin-total-badge[hidden]{display:none!important}
+.admin-nav-item.active .admin-nav-badge{background:#e45b69;color:#fff}
+@media(max-width:720px){.admin-main-toolbar{gap:8px}.admin-alert-summary{font-size:11px}.admin-total-badge{min-width:20px;height:20px}}

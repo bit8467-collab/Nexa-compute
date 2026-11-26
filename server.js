@@ -405,6 +405,7 @@ const websimWorker = {
       if (method === "POST" && path === "/api/settings") return await updateSettings(request, env);
       if (method === "POST" && path === "/api/admin/login") return await adminLogin(request, env);
       if (method === "POST" && path === "/api/admin/logout") return await adminLogout(request, env);
+      if (method === "GET" && path === "/api/admin/request-counts") return await adminRequestCounts(request, env);
       if (method === "GET" && path === "/api/admin/overview") return await adminOverview(request, env);
       if (method === "POST" && path === "/api/change-password") return await changePassword(request, env);
       if (method === "GET" && path === "/api/rentals") return await getRentals(request, env);
@@ -987,6 +988,28 @@ async function adminLogin(request) {
   return Response.json({ ok: true });
 }
 async function adminLogout() { return Response.json({ ok: true }); }
+async function adminRequestCounts(request, env) {
+  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const row = await env.DB.prepare(
+    "SELECT " +
+    "(SELECT COUNT(*) FROM account_requests WHERE kind='deposit' AND status='pending') AS deposit_requests, " +
+    "(SELECT COUNT(*) FROM account_requests WHERE kind='withdrawal' AND status='pending') AS withdrawal_requests, " +
+    "(SELECT COUNT(*) FROM compute_rentals WHERE status='pending') AS compute_requests, " +
+    "(SELECT COUNT(*) FROM email_verifications WHERE status IN ('pending','code_sent')) AS email_verifications, " +
+    "(SELECT COUNT(*) FROM server_instances WHERE status='pending') AS servers, " +
+    "(SELECT COUNT(*) FROM (SELECT account_id, MAX(id) AS latest_id FROM support_messages GROUP BY account_id) latest " +
+      "JOIN support_messages m ON m.id=latest.latest_id WHERE m.sender='user') AS support_messages"
+  ).first();
+  return Response.json({ counts: {
+    depositRequests: Number(row?.deposit_requests || 0),
+    withdrawalRequests: Number(row?.withdrawal_requests || 0),
+    computeRequests: Number(row?.compute_requests || 0),
+    emailVerifications: Number(row?.email_verifications || 0),
+    servers: Number(row?.servers || 0),
+    support: Number(row?.support_messages || 0)
+  }});
+}
+
 async function adminOverview(request, env) {
   if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
   const [summary, users, deposits, withdrawals, investments, rentals, accountRequests, purchases] = await Promise.all([
@@ -1013,8 +1036,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const databaseUrl = process.env.TURSO_DATABASE_URL || 'file:./nexa-render.db';
+const configuredDatabaseUrl = (process.env.TURSO_DATABASE_URL || '').trim();
+const databaseUrl = configuredDatabaseUrl || 'file:./nexa-render.db';
 const databaseToken = process.env.TURSO_AUTH_TOKEN || process.env.TURSO_DATABASE_AUTH_TOKEN;
+if (!databaseUrl.startsWith('file:') && !databaseToken) throw new Error('Configure TURSO_AUTH_TOKEN (or TURSO_DATABASE_AUTH_TOKEN) for the remote database.');
 const libsql = createClient({ url: databaseUrl, ...(databaseToken ? { authToken: databaseToken } : {}), intMode: 'number' });
 function resultRows(result) {
   const columns = result.columns || [];

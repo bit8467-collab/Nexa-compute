@@ -73,22 +73,22 @@
               <p class="admin-sidebar-label">SEZIONI</p>
               <nav class="admin-navigation">
                 <button type="button" class="admin-nav-item active" data-admin-section="overview" aria-current="page"><span class="admin-nav-icon" aria-hidden="true">◫</span><span>Panoramica</span></button>
-                <button type="button" class="admin-nav-item" data-admin-section="support"><span class="admin-nav-icon" aria-hidden="true">◌</span><span>Chat assistenza</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="support"><span class="admin-nav-icon" aria-hidden="true">◌</span><span>Chat assistenza</span><span class="admin-nav-badge" data-admin-badge="support" hidden aria-hidden="true">0</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="users"><span class="admin-nav-icon" aria-hidden="true">♙</span><span>Utenti</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="deposits"><span class="admin-nav-icon" aria-hidden="true">↓</span><span>Depositi registrati</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="withdrawals"><span class="admin-nav-icon" aria-hidden="true">↑</span><span>Prelievi registrati</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="investments"><span class="admin-nav-icon" aria-hidden="true">▤</span><span>Posizioni registrate</span></button>
                 <button type="button" class="admin-nav-item" data-admin-section="wallets"><span class="admin-nav-icon" aria-hidden="true">⌁</span><span>Indirizzi di deposito USDT</span></button>
-                <button type="button" class="admin-nav-item" data-admin-section="verification"><span class="admin-nav-icon" aria-hidden="true">✉</span><span>Verifica email</span></button>
-                <button type="button" class="admin-nav-item" data-admin-section="deposit-requests"><span class="admin-nav-icon" aria-hidden="true">⇩</span><span>Richieste depositi</span></button>
-                <button type="button" class="admin-nav-item" data-admin-section="withdrawal-requests"><span class="admin-nav-icon" aria-hidden="true">⇧</span><span>Richieste prelievi</span></button>
-                <button type="button" class="admin-nav-item" data-admin-section="servers"><span class="admin-nav-icon" aria-hidden="true">▣</span><span>Server acquistati · stato manuale</span></button>
-                <button type="button" class="admin-nav-item" data-admin-section="compute-requests"><span class="admin-nav-icon" aria-hidden="true">⌘</span><span>Richieste compute</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="verification"><span class="admin-nav-icon" aria-hidden="true">✉</span><span>Verifica email</span><span class="admin-nav-badge" data-admin-badge="verification" hidden aria-hidden="true">0</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="deposit-requests"><span class="admin-nav-icon" aria-hidden="true">⇩</span><span>Richieste depositi</span><span class="admin-nav-badge" data-admin-badge="depositRequests" hidden aria-hidden="true">0</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="withdrawal-requests"><span class="admin-nav-icon" aria-hidden="true">⇧</span><span>Richieste prelievi</span><span class="admin-nav-badge" data-admin-badge="withdrawalRequests" hidden aria-hidden="true">0</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="servers"><span class="admin-nav-icon" aria-hidden="true">▣</span><span>Server acquistati · stato manuale</span><span class="admin-nav-badge" data-admin-badge="servers" hidden aria-hidden="true">0</span></button>
+                <button type="button" class="admin-nav-item" data-admin-section="compute-requests"><span class="admin-nav-icon" aria-hidden="true">⌘</span><span>Richieste compute</span><span class="admin-nav-badge" data-admin-badge="computeRequests" hidden aria-hidden="true">0</span></button>
               </nav>
               <button class="admin-logout" id="adminLogout" type="button">Esci dal pannello</button>
             </aside>
             <main class="admin-main" id="adminMain">
-              <div class="admin-main-toolbar"><button class="btn-mini" id="adminRefresh" type="button">Aggiorna</button></div><div class="admin-feedback"><p class="auth-err" id="adminDataError" role="status"></p></div>
+              <div class="admin-main-toolbar"><div class="admin-alert-summary" role="status" aria-live="polite"><span class="admin-alert-dot" aria-hidden="true"></span><span>Richieste aperte</span><b class="admin-total-badge" id="adminTotalBadge" hidden>0</b></div><button class="btn-mini" id="adminRefresh" type="button">Aggiorna</button></div><div class="admin-feedback"><p class="auth-err" id="adminDataError" role="status"></p></div>
               <section class="admin-page active" data-admin-page="overview">
                 <div class="admin-page-head"><div><p class="eyebrow">PANORAMICA</p><h1>Controllo piattaforma</h1></div></div><p class="admin-warning" id="adminDataWarning">Vista amministrativa in sola lettura.</p><div class="admin-metrics" id="adminMetrics"></div>
               </section>
