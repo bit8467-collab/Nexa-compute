@@ -702,18 +702,12 @@ async function findRecoveryAccount(env, identifier) {
 }
 async function requestPasswordRecovery(request,env) {
   let body;try{body=await request.json();}catch{return bad("Inserisci il tuo account.");}
-  const identifier=recoveryIdentifier(body);
-  if(!identifier) return bad("Inserisci un identificativo valido.");
-  const account=await findRecoveryAccount(env,identifier);
-  // Return the same response for unknown accounts and accounts without a recoverable email.
-  if(!account?.recovery_email) return Response.json({ok:true});
-  const now=Date.now();
-  const previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
-  if(previous?.email===account.recovery_email&&previous.status==="code_sent"&&Number(previous.otp_expires||0)>now) return Response.json({ok:true});
-  if(previous?.email===account.recovery_email&&["pending","code_sent"].includes(previous.status)&&now-Number(previous.updated_at||0)<60000) return Response.json({ok:true});
-  await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(account.id,account.recovery_email,now,now).run();
-  const sent=await sendEmailOtp(env,{user_id:account.id,email:account.recovery_email,username:account.username});
-  if(!sent.ok){await env.DB.prepare("UPDATE email_verifications SET updated_at=? WHERE user_id=? AND status='pending'").bind(now-60000,account.id).run();return Response.json({error:sent.error},{status:sent.status});}
+  const identifier=recoveryIdentifier(body);if(!identifier)return bad("Inserisci un identificativo valido.");
+  const account=await findRecoveryAccount(env,identifier);if(!account?.recovery_email)return Response.json({ok:true});
+  const now=Date.now(),previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
+  if(previous?.email===account.recovery_email&&previous.status==="recovery_code_sent"&&Number(previous.otp_expires||0)>now)return Response.json({ok:true});
+  if(previous?.email===account.recovery_email&&previous.status==="recovery_pending"&&now-Number(previous.updated_at||0)<60000)return Response.json({ok:true});
+  await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'recovery_pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='recovery_pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(account.id,account.recovery_email,now,now).run();
   return Response.json({ok:true});
 }
 async function resetPasswordWithOtp(request,env) {
@@ -726,14 +720,14 @@ async function resetPasswordWithOtp(request,env) {
   const invalid=()=>Response.json({error:"Codice OTP non valido o scaduto."},{status:400});
   if(!account?.recovery_email) return invalid();
   const row=await env.DB.prepare("SELECT email,status,otp_hash,otp_expires,attempts FROM email_verifications WHERE user_id=?").bind(account.id).first();
-  if(!row||row.email!==account.recovery_email||row.status!=="code_sent"||!row.otp_hash) return invalid();
+  if(!row||row.email!==account.recovery_email||row.status!=="recovery_code_sent"||!row.otp_hash) return invalid();
   const now=Date.now();
-  if(Number(row.otp_expires||0)<=now){await env.DB.prepare("UPDATE email_verifications SET status='expired',otp_hash=NULL,updated_at=? WHERE user_id=? AND status='code_sent'").bind(now,account.id).run();return invalid();}
+  if(Number(row.otp_expires||0)<=now){await env.DB.prepare("UPDATE email_verifications SET status='expired',otp_hash=NULL,updated_at=? WHERE user_id=? AND status='recovery_code_sent'").bind(now,account.id).run();return invalid();}
   const attempts=Number(row.attempts||0);
   if(attempts>=5) return invalid();
   const submitted=await hash(code,String(account.id)+":"+row.email);
-  if(submitted!==row.otp_hash){const nextAttempts=attempts+1;await env.DB.prepare("UPDATE email_verifications SET attempts=?,status=?,otp_hash=?,updated_at=? WHERE user_id=? AND status='code_sent' AND otp_hash=?").bind(nextAttempts,nextAttempts>=5?"expired":"code_sent",nextAttempts>=5?null:row.otp_hash,now,account.id,row.otp_hash).run();return invalid();}
-  const consumed=await env.DB.prepare("UPDATE email_verifications SET status='verified',otp_hash=NULL,otp_expires=NULL,attempts=0,updated_at=? WHERE user_id=? AND status='code_sent' AND otp_hash=? AND otp_expires>?").bind(now,account.id,row.otp_hash,now).run();
+  if(submitted!==row.otp_hash){const nextAttempts=attempts+1;await env.DB.prepare("UPDATE email_verifications SET attempts=?,status=?,otp_hash=?,updated_at=? WHERE user_id=? AND status='recovery_code_sent' AND otp_hash=?").bind(nextAttempts,nextAttempts>=5?"expired":"recovery_code_sent",nextAttempts>=5?null:row.otp_hash,now,account.id,row.otp_hash).run();return invalid();}
+  const consumed=await env.DB.prepare("UPDATE email_verifications SET status='verified',otp_hash=NULL,otp_expires=NULL,attempts=0,updated_at=? WHERE user_id=? AND status='recovery_code_sent' AND otp_hash=? AND otp_expires>?").bind(now,account.id,row.otp_hash,now).run();
   if(!consumed.meta?.changes) return invalid();
   const salt=genSalt(),passwordHash=await hash(next,salt);
   await env.DB.batch([
@@ -1182,15 +1176,12 @@ async function requestEmailVerification(request, env) {
   let body;try{body=await request.json();}catch{return bad("Indirizzo email non valido.");}
   const email=String(body.email||"").trim().toLowerCase();
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254) return bad("Inserisci un indirizzo email valido.");
-  const now=Date.now(), previous=await env.DB.prepare("SELECT status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(user.id).first();
+  const now=Date.now(),previous=await env.DB.prepare("SELECT status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(user.id).first();
   if(previous?.status==="code_sent"&&Number(previous.otp_expires||0)>now) return Response.json({ok:true,status:"code_sent"});
   if(previous?.status==="pending"&&now-Number(previous.updated_at||0)<60000) return Response.json({ok:true,status:"pending"});
   await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(user.id,email,now,now).run();
-  const sent=await sendEmailOtp(env,{user_id:user.id,email,username:user.username});
-  if(!sent.ok){await env.DB.prepare("UPDATE email_verifications SET updated_at=? WHERE user_id=? AND status='pending'").bind(now-60000,user.id).run();return Response.json({error:sent.error},{status:sent.status});}
-  return Response.json({ok:true,status:"code_sent",expires_at:sent.expires_at});
+  return Response.json({ok:true,status:"pending"});
 }
-
 async function verifyEmailCode(request, env) {
   const user = await sessionUser(request, env);
   if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
@@ -1224,30 +1215,20 @@ async function adminEmailVerifications(request, env) {
   const rows = await env.DB.prepare("SELECT e.user_id AS id,e.email,e.status,e.created_at,e.otp_expires,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id ORDER BY e.created_at DESC LIMIT 500").all();
   return Response.json({ requests: rows.results || [] });
 }
-async function sendEmailOtp(env,row) {
-  const apiKey=String(env.RESEND_API_KEY||"").trim(),from=String(env.EMAIL_FROM||"").trim();
-  if(!apiKey||!from) return {ok:false,status:503,error:"Configura RESEND_API_KEY e EMAIL_FROM con un mittente del dominio verificato nelle variabili Render."};
-  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);
-  const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
-  let mail;
-  try { mail=await fetch("https://api.resend.com/emails",{method:"POST",headers:{"Authorization":"Bearer "+apiKey,"Content-Type":"application/json"},body:JSON.stringify({from,to:[row.email],subject:"Codice di sicurezza Nexa Compute",text:"Ciao "+row.username+",\n\nil tuo codice OTP Nexa Compute è: "+otp+"\n\nIl codice è valido per 15 minuti.\n\nNexa Compute"})}); }
-  catch(error){console.error("OTP email delivery failed",String(error));return {ok:false,status:502,error:"Invio email non riuscito. Verifica la connessione al servizio email."};}
-  if(!mail.ok){const detail=await mail.text();console.error("OTP email delivery failed",mail.status,detail.slice(0,500));return {ok:false,status:502,error:"Invio email non riuscito. Verifica il mittente e la configurazione del servizio email."};}
-  const otpHash=await hash(otp,String(row.user_id)+":"+row.email);
-  await env.DB.prepare("UPDATE email_verifications SET status='code_sent',otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=?").bind(otpHash,now+15*60*1000,now,row.user_id).run();
-  return {ok:true,expires_at:now+15*60*1000};
-}
 async function generateEmailOtp(request, env) {
   const access=await requireAdminPermission(request,env,"verification");
-  if(!access) return Response.json({error:"Permesso amministratore mancante."},{status:403});
-  const body=await request.json(), userId=String(body.id||"");
+  if(!access)return Response.json({error:"Permesso amministratore mancante."},{status:403});
+  const body=await request.json(),userId=String(body.id||"");
   const row=await env.DB.prepare("SELECT e.user_id,e.email,e.status,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id WHERE e.user_id=?").bind(userId).first();
-  if(!row||!["pending","code_sent"].includes(row.status)) return bad("Richiesta di verifica non disponibile.");
-  const sent=await sendEmailOtp(env,row);
-  if(!sent.ok) return Response.json({error:sent.error},{status:sent.status});
-  return Response.json({ok:true,email:row.email,expires_at:sent.expires_at});
+  const allowed=["pending","code_sent","recovery_pending","recovery_code_sent"];
+  if(!row||!allowed.includes(row.status))return bad("Richiesta OTP non disponibile.");
+  const recovery=row.status.startsWith("recovery_"),status=recovery?"recovery_code_sent":"code_sent";
+  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
+  const otpHash=await hash(otp,String(row.user_id)+":"+row.email);
+  const updated=await env.DB.prepare("UPDATE email_verifications SET status=?,otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=? AND status=?").bind(status,otpHash,now+15*60*1000,now,row.user_id,row.status).run();
+  if(!updated.meta?.changes)return Response.json({error:"Richiesta OTP già aggiornata."},{status:409});
+  return Response.json({ok:true,email:row.email,username:row.username,otp,expires_at:now+15*60*1000,recovery});
 }
-
 function isProjectOwner(request) {
   const userId = request.headers.get("x-websim-user-id");
   const ownerId = request.headers.get("x-websim-project-owner-id");
@@ -1558,7 +1539,7 @@ function makeD1Adapter(client) {
     }
   };
 }
-const env = { DB: makeD1Adapter(libsql), TURSO_DB_BOUND: true, RESEND_API_KEY: process.env.RESEND_API_KEY, EMAIL_FROM: process.env.EMAIL_FROM };
+const env = { DB: makeD1Adapter(libsql), TURSO_DB_BOUND: true };
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
