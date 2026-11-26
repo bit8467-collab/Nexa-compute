@@ -184,6 +184,13 @@ async function sessionUser(request, env) {
   if (!s) return null;
   return env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(s.user_id).first();
 }
+async function operatorRoleForUser(env,userId) {
+  if(!userId) return {enabled:false,permissions:[]};
+  const row=await env.DB.prepare("SELECT permissions,enabled FROM admin_operators WHERE user_id=?").bind(userId).first();
+  let permissions=[];
+  try { const parsed=JSON.parse(row?.permissions||"[]"); if(Array.isArray(parsed)) permissions=parsed.filter(value=>ADMIN_PERMISSIONS.includes(value)); } catch {}
+  return {enabled:Number(row?.enabled)===1,permissions};
+}
 
 async function accrue(env, userId) {
   let wallet = await env.DB.prepare("SELECT * FROM wallets WHERE user_id = ?").bind(userId).first();
@@ -574,6 +581,12 @@ const websimWorker = {
     await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS account_requests_tx_hash ON account_requests(tx_hash) WHERE tx_hash IS NOT NULL").run();
 
 
+    const tokenUser=await sessionUser(request,env);
+    if(tokenUser&&!isProjectOwner(request)) {
+      const tokenRole=await operatorRoleForUser(env,tokenUser.id);
+      const allowedOperatorPath=path.startsWith("/api/admin/")||["/api/me","/api/logout","/api/login"].includes(path)||path.startsWith("/api/password-recovery/");
+      if(tokenRole.enabled&&!allowedOperatorPath) return Response.json({error:"Questo account operatore può accedere solo al pannello amministratore."},{status:403});
+    }
     try {
       if (method === "POST" && path === "/api/register") return await register(request, env);
       if (method === "POST" && path === "/api/login") return await login(request, env);
@@ -671,7 +684,8 @@ async function login(request, env) {
   if (ph !== u.password_hash) return Response.json({ error: "Password non corretta." }, { status: 400 });
   const token = makeToken();
   await env.DB.prepare("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)").bind(token, u.id, Date.now()).run();
-  return Response.json({ ok: true, token });
+  const role=isProjectOwner(request)?{enabled:false,permissions:[]}:await operatorRoleForUser(env,u.id);
+  return Response.json({ ok: true, token, operator:role.enabled, permissions:role.enabled?role.permissions:[] });
 }
 
 function recoveryIdentifier(body) {
@@ -737,6 +751,10 @@ async function logout(request, env) {
 async function me(request, env) {
   const user = await sessionUser(request, env);
   if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
+  if(!isProjectOwner(request)) {
+    const role=await operatorRoleForUser(env,user.id);
+    if(role.enabled) return Response.json({operator:true,permissions:role.permissions,user:{id:user.id,username:user.username,identifier:user.identifier}});
+  }
   return Response.json(await fullState(env, user));
 }
 
