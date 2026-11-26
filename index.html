@@ -131,6 +131,13 @@
       </div>
     </section>
 
+    <div id="adminUserModal" class="admin-user-modal" hidden>
+      <div class="admin-user-backdrop" data-admin-user-close></div>
+      <section class="admin-user-dialog" role="dialog" aria-modal="true" aria-labelledby="adminUserModalTitle">
+        <header class="admin-user-dialog-head"><div><p class="eyebrow">NEXA CONTROL</p><h2 id="adminUserModalTitle">Dettagli utente</h2></div><button type="button" class="admin-user-close" data-admin-user-close aria-label="Chiudi dettagli utente">×</button></header>
+        <div id="adminUserDetail" class="admin-user-detail"><p class="service-note">Caricamento dati utente…</p></div>
+      </section>
+    </div>
     <div class="appbody" id="appBody" hidden>
       <header class="appbar">
         <div class="brand"><span class="logo">NX</span><div><span class="brand-name">Nexa Compute</span><span class="brand-sub">Calcolo on demand</span></div></div>
@@ -183,7 +190,7 @@
         <header class="history-header"><button id="closeHistory" aria-label="Chiudi cronologia">←</button><div><b>Cronologia movimenti</b><small>Movimenti del tuo account</small></div></header>
         <div class="history-content">
 
-          <p class="history-note">Gli accrediti elencati sono quelli registrati nel sistema; i movimenti precedenti all’attivazione del registro potrebbero non avere dettaglio.</p><div class="history-filter-row"><label for="historyFilter">Mostra</label><select id="historyFilter"><option value="all">Tutti i movimenti</option><option value="purchase">Acquisti</option><option value="deposit">Depositi</option><option value="withdrawal">Prelievi</option><option value="credit">Accrediti</option></select></div>
+          <p class="history-note">Gli accrediti elencati sono quelli registrati nel sistema; i movimenti precedenti all’attivazione del registro potrebbero non avere dettaglio.</p><div class="history-filter-row"><label for="historyFilter">Mostra</label><select id="historyFilter"><option value="all">Tutti i movimenti</option><option value="purchase">Acquisti</option><option value="deposit">Depositi</option><option value="withdrawal">Prelievi</option><option value="credit">Accrediti</option><option value="maintenance">Manutenzione</option></select></div>
           <div id="historyList"></div><div class="empty" id="historyEmpty" hidden><span>◌</span><p>Nessun movimento per questo filtro.</p></div>
         </div>
       </section>

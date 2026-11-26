@@ -326,6 +326,26 @@ const websimWorker = {
         credited_yield REAL NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS server_instances_user ON server_instances (user_id, status);
+      CREATE TABLE IF NOT EXISTS server_maintenance_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        purchase_id TEXT NOT NULL,
+        maintenance_started_at INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(purchase_id, maintenance_started_at)
+      );
+      CREATE INDEX IF NOT EXISTS server_maintenance_user ON server_maintenance_payments (user_id, created_at);
+      CREATE TABLE IF NOT EXISTS admin_balance_adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        old_value REAL NOT NULL,
+        new_value REAL NOT NULL,
+        created_at INTEGER NOT NULL,
+        admin_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS admin_balance_adjustments_user ON admin_balance_adjustments (user_id, created_at);
       CREATE TABLE IF NOT EXISTS earning_credits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT NOT NULL,
@@ -406,6 +426,8 @@ const websimWorker = {
       if (method === "POST" && path === "/api/admin/login") return await adminLogin(request, env);
       if (method === "POST" && path === "/api/admin/logout") return await adminLogout(request, env);
       if (method === "GET" && path === "/api/admin/request-counts") return await adminRequestCounts(request, env);
+      if (method === "GET" && path === "/api/admin/user-details") return await adminUserDetails(request, env);
+      if (method === "POST" && path === "/api/admin/update-user") return await adminUpdateUser(request, env);
       if (method === "GET" && path === "/api/admin/overview") return await adminOverview(request, env);
       if (method === "POST" && path === "/api/change-password") return await changePassword(request, env);
       if (method === "GET" && path === "/api/rentals") return await getRentals(request, env);
@@ -421,6 +443,7 @@ const websimWorker = {
       if (method === "POST" && path === "/api/admin/deposit-addresses") return await saveAdminDepositAddresses(request, env);
       if (method === "POST" && path === "/api/admin/review-rental") return await reviewRental(request, env);
       if (method === "GET" && path === "/api/servers") return await getServers(request, env);
+      if (method === "POST" && path === "/api/servers/restore") return await restoreUserServer(request, env);
       if (method === "POST" && path === "/api/admin/server-status") return await setServerStatus(request, env);
       if (method === "POST" && path === "/api/admin/review-account-request") return await reviewAccountRequest(request, env);
     } catch (e) {
@@ -809,32 +832,84 @@ async function getServers(request, env) {
     const runningSeconds = activeSince ? Math.max(0, (now - activeSince) / 1000) : 0;
     const activeSeconds = Number(row.active_seconds || 0) + runningSeconds;
     const totalYield = Number(row.yield_total || 0) + model.daily * activeSeconds / 86400;
-    return { ...row, total_yield: totalYield, active_seconds: activeSeconds };
+    return { ...row, total_yield: totalYield, active_seconds: activeSeconds, maintenance_fee: Math.round(Number(row.price || 0) * 5) / 100 };
   });
-  return Response.json({ servers });
+  const payments = (await env.DB.prepare("SELECT id, purchase_id, amount, created_at, maintenance_started_at FROM server_maintenance_payments WHERE user_id=? ORDER BY created_at DESC").bind(user.id).all()).results || [];
+  return Response.json({ servers, maintenance_payments: payments });
+}
+async function restoreMaintenanceServer(env, userId, purchaseId, actorId) {
+  const current = await env.DB.prepare("SELECT s.status, s.updated_at, p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=? AND s.user_id=?").bind(purchaseId, userId).first();
+  if (!current) return { error: "Server non trovato.", status: 404 };
+  if (current.status !== "maintenance") return { error: "Il server non è in manutenzione.", status: 409 };
+  const fee = Math.round(Number(current.price || 0) * 5) / 100;
+  const wallet = await env.DB.prepare("SELECT deposit FROM wallets WHERE user_id=?").bind(userId).first();
+  if (Number(wallet?.deposit || 0) < fee) return { error: "Saldo deposito insufficiente per ripristinare il server. Deposita almeno " + fee.toFixed(2) + " USDT.", status: 400, fee };
+  const cycleAt = Number(current.updated_at || 0), now = Date.now();
+  const result = await env.DB.batch([
+    env.DB.prepare("INSERT INTO server_maintenance_payments (user_id,purchase_id,maintenance_started_at,amount,created_at) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM server_instances WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=?) AND EXISTS (SELECT 1 FROM wallets WHERE user_id=? AND deposit>=?) AND NOT EXISTS (SELECT 1 FROM server_maintenance_payments WHERE purchase_id=? AND maintenance_started_at=?)").bind(userId,purchaseId,cycleAt,fee,now,purchaseId,userId,cycleAt,userId,fee,purchaseId,cycleAt),
+    env.DB.prepare("UPDATE wallets SET deposit=deposit-? WHERE user_id=? AND deposit>=? AND EXISTS (SELECT 1 FROM server_maintenance_payments WHERE user_id=? AND purchase_id=? AND maintenance_started_at=? AND created_at=?) AND EXISTS (SELECT 1 FROM server_instances WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=?)").bind(fee,userId,fee,userId,purchaseId,cycleAt,now,purchaseId,userId,cycleAt),
+    env.DB.prepare("UPDATE server_instances SET status='active',updated_at=?,updated_by=?,active_since=? WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=? AND EXISTS (SELECT 1 FROM server_maintenance_payments WHERE user_id=? AND purchase_id=? AND maintenance_started_at=? AND created_at=?)").bind(now,actorId,now,purchaseId,userId,cycleAt,userId,purchaseId,cycleAt,now)
+  ]);
+  if (!result[0]?.meta?.changes) return { error: "Il server è già stato ripristinato oppure il saldo è insufficiente.", status: 409, fee };
+  if (!result[1]?.meta?.changes || !result[2]?.meta?.changes) return { error: "Impossibile completare il pagamento di manutenzione. Aggiorna la pagina e riprova.", status: 409, fee };
+  const updatedWallet = await env.DB.prepare("SELECT deposit FROM wallets WHERE user_id=?").bind(userId).first();
+  return { ok: true, purchase_id: purchaseId, fee, deposit_balance: Number(updatedWallet?.deposit || 0), updated_at: now };
+}
+async function restoreUserServer(request, env) {
+  const user = await sessionUser(request, env);
+  if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
+  let body;
+  try { body = await request.json(); } catch { return bad("Server non valido."); }
+  const purchaseId = typeof body.purchase_id === "string" ? body.purchase_id.trim() : "";
+  if (!purchaseId || purchaseId.length > 128) return bad("Server non valido.");
+  const result = await restoreMaintenanceServer(env, user.id, purchaseId, user.id);
+  if (!result.ok) return Response.json({ error: result.error }, { status: result.status });
+  return Response.json(result);
 }
 async function setServerStatus(request, env) {
   if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
-  const body = await request.json();
-  const purchaseId = typeof body.purchase_id === "string" ? body.purchase_id : "";
+  let body;
+  try { body = await request.json(); } catch { return bad("Stato server non valido."); }
+  const purchaseId = typeof body.purchase_id === "string" ? body.purchase_id.trim() : "";
   const status = body.status;
-  if (!purchaseId || !["active", "offline", "pending"].includes(status)) return bad("Stato server non valido.");
-  const current = await env.DB.prepare("SELECT s.status, s.updated_at, s.active_since, s.yield_total, s.active_seconds, p.product_id FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=?").bind(purchaseId).first();
+  if (!purchaseId || !["active", "offline", "pending", "maintenance"].includes(status)) return bad("Stato server non valido.");
+  const current = await env.DB.prepare("SELECT s.user_id,s.status,s.updated_at,s.active_since,s.yield_total,s.active_seconds,s.credited_yield,p.product_id,p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=?").bind(purchaseId).first();
   if (!current) return Response.json({ error: "Acquisto server non trovato." }, { status: 404 });
+  const nextProduct = body.product_id === undefined ? current.product_id : String(body.product_id);
+  if (!COMPUTE_CATALOG.has(nextProduct)) return bad("Modello non valido.");
+  const nextPrice = body.price === undefined ? Number(current.price) : Number(body.price);
+  if (!Number.isFinite(nextPrice) || nextPrice <= 0 || nextPrice > 1e12) return bad("Prezzo server non valido.");
+  const values = {};
+  for (const key of ["yield_total", "active_seconds", "credited_yield"]) {
+    const raw = body[key] === undefined ? Number(current[key] || 0) : Number(body[key]);
+    if (!Number.isFinite(raw) || raw < 0 || raw > 1e15) return bad("Dati server non validi.");
+    values[key] = raw;
+  }
+  if (current.status === "maintenance" && status === "active") {
+    const restored = await restoreMaintenanceServer(env, current.user_id, purchaseId, request.headers.get("x-websim-user-id"));
+    if (!restored.ok) return Response.json({ error: restored.error }, { status: restored.status });
+  }
   const now = Date.now();
-  let yieldTotal = Number(current.yield_total || 0);
-  let activeSeconds = Number(current.active_seconds || 0);
+  let yieldTotal = Number(current.yield_total || 0), activeSeconds = Number(current.active_seconds || 0);
   let activeSince = current.status === "active" ? Number(current.active_since || current.updated_at || now) : null;
   if (current.status === "active" && status !== "active") {
     const elapsed = Math.max(0, (now - activeSince) / 1000);
     activeSeconds += elapsed;
     yieldTotal += (COMPUTE_CATALOG.get(current.product_id)?.daily || 0) * elapsed / 86400;
     activeSince = null;
-  } else if (current.status !== "active" && status === "active") {
-    activeSince = now;
-  }
-  await env.DB.prepare("UPDATE server_instances SET status=?, updated_at=?, updated_by=?, yield_total=?, active_seconds=?, active_since=? WHERE purchase_id=?").bind(status, now, request.headers.get("x-websim-user-id"), yieldTotal, activeSeconds, activeSince, purchaseId).run();
-  return Response.json({ ok: true, purchase_id: purchaseId, status });
+  } else if (current.status !== "active" && status === "active") activeSince = now;
+  const yieldEdited = body.yield_total !== undefined && values.yield_total !== Number(current.yield_total || 0);
+  const secondsEdited = body.active_seconds !== undefined && values.active_seconds !== Number(current.active_seconds || 0);
+  const finalYield = yieldEdited ? values.yield_total : yieldTotal;
+  const finalSeconds = secondsEdited ? values.active_seconds : activeSeconds;
+  if (current.status === "active" && status === "active" && (yieldEdited || secondsEdited)) activeSince = now;
+  const finalCredited = values.credited_yield;
+  const result = await env.DB.batch([
+    env.DB.prepare("UPDATE server_instances SET status=?,updated_at=?,updated_by=?,yield_total=?,active_seconds=?,active_since=?,credited_yield=? WHERE purchase_id=?").bind(status,now,request.headers.get("x-websim-user-id"),finalYield,finalSeconds,activeSince,finalCredited,purchaseId),
+    env.DB.prepare("UPDATE compute_purchases SET product_id=?,price=? WHERE id=?").bind(nextProduct,nextPrice,purchaseId)
+  ]);
+  if (!result[0]?.meta?.changes) return Response.json({ error: "Server non aggiornato." }, { status: 409 });
+  return Response.json({ ok: true, purchase_id: purchaseId, status, product_id: nextProduct, price: nextPrice });
 }
 
 async function getEmailVerification(request, env) {
@@ -1026,6 +1101,79 @@ async function adminOverview(request, env) {
 }
 
 
+
+async function adminUserDetails(request, env) {
+  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  const id = new URL(request.url).searchParams.get("id") || "";
+  if (!id || id.length > 128) return bad("Utente non valido.");
+  const user = await env.DB.prepare("SELECT id,username,identifier,invite_code,referred_by,created_at,email_verified FROM users WHERE id=?").bind(id).first();
+  if (!user) return Response.json({ error: "Utente non trovato." }, { status: 404 });
+  const [wallet,settings,verification,investments,deposits,withdrawals,accountRequests,rentals,purchases,earningCredits,referralCommissions,referrals,supportMessages,serverMaintenancePayments,balanceAdjustments] = await Promise.all([
+    env.DB.prepare("SELECT deposit,earnings,total_deposited,total_earned,total_withdrawn FROM wallets WHERE user_id=?").bind(id).first(),
+    env.DB.prepare("SELECT withdraw_wallets,notifications FROM settings WHERE user_id=?").bind(id).first(),
+    env.DB.prepare("SELECT email,status,created_at,updated_at,otp_expires,attempts FROM email_verifications WHERE user_id=?").bind(id).first(),
+    env.DB.prepare("SELECT id,amount,days,rate,created,credited,active FROM investments WHERE user_id=? ORDER BY created DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,amount,net,date FROM deposits WHERE user_id=? ORDER BY date DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,amount,net,date FROM withdrawals WHERE user_id=? ORDER BY date DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,kind,amount,status,created_at,reviewed_at,network,tx_hash,withdrawal_address FROM account_requests WHERE user_id=? ORDER BY created_at DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,product_id,status,created_at,reviewed_at FROM compute_rentals WHERE user_id=? ORDER BY created_at DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT p.id AS purchase_id,p.product_id,p.price,p.purchased_at,s.status,s.updated_at,s.updated_by,s.yield_total,s.active_seconds,s.active_since,s.credited_yield FROM compute_purchases p JOIN server_instances s ON s.purchase_id=p.id WHERE p.user_id=? ORDER BY p.purchased_at DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,investment_id,amount,created_at,earning_type,server_purchase_id FROM earning_credits WHERE user_id=? ORDER BY created_at DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,referrer_id,referred_user_id,source_kind,source_id,amount,applied,created_at FROM referral_commissions WHERE referrer_id=? OR referred_user_id=? ORDER BY created_at DESC,id DESC").bind(id,id).all(),
+    env.DB.prepare("SELECT id,username,identifier,created_at FROM users WHERE referred_by=? ORDER BY created_at DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,sender,body,created_at FROM support_messages WHERE account_id=? ORDER BY id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,purchase_id,maintenance_started_at,amount,created_at FROM server_maintenance_payments WHERE user_id=? ORDER BY created_at DESC,id DESC").bind(id).all(),
+    env.DB.prepare("SELECT id,field,old_value,new_value,created_at,admin_id FROM admin_balance_adjustments WHERE user_id=? ORDER BY created_at DESC,id DESC").bind(id).all()
+  ]);
+  return Response.json({ user, wallet: wallet || { deposit:0,earnings:0,total_deposited:0,total_earned:0,total_withdrawn:0 }, settings: settings || { withdraw_wallets:"{}",notifications:1 }, verification: verification || null, investments:investments.results||[], deposits:deposits.results||[], withdrawals:withdrawals.results||[], accountRequests:accountRequests.results||[], rentals:rentals.results||[], purchases:purchases.results||[], earningCredits:earningCredits.results||[], referralCommissions:referralCommissions.results||[], referrals:referrals.results||[], supportMessages:supportMessages.results||[], serverMaintenancePayments:serverMaintenancePayments.results||[], balanceAdjustments:balanceAdjustments.results||[] });
+}
+async function adminUpdateUser(request, env) {
+  if (!isProjectOwner(request)) return Response.json({ error: "Accesso riservato al proprietario del progetto." }, { status: 403 });
+  let body;
+  try { body = await request.json(); } catch { return bad("Dati utente non validi."); }
+  const id = typeof body.id === "string" ? body.id.trim() : "";
+  const profile = body.profile || {}, rawWallet = body.wallet || {}, settings = body.settings || {};
+  if (!id || id.length > 128) return bad("Utente non valido.");
+  const current = await env.DB.prepare("SELECT id,email_verified FROM users WHERE id=?").bind(id).first();
+  if (!current) return Response.json({ error: "Utente non trovato." }, { status: 404 });
+  const username = String(profile.username || "").trim();
+  const identifier = String(profile.identifier || "").trim();
+  if (!username || username.length > 80 || !identifier || identifier.length > 254 || !/^[+\-\w.@ ]+$/.test(identifier)) return bad("Nome utente o email/telefono non valido.");
+  const duplicate = await env.DB.prepare("SELECT id FROM users WHERE id<>? AND (lower(username)=lower(?) OR lower(identifier)=lower(?)) LIMIT 1").bind(id,username,identifier).first();
+  if (duplicate) return Response.json({ error: "Email/telefono o nome utente già registrato." }, { status: 409 });
+  if (typeof profile.email_verified !== "boolean") return bad("Stato verifica email non valido.");
+  const fields = ["deposit","earnings","total_deposited","total_earned","total_withdrawn"];
+  const wallet = {};
+  for (const field of fields) {
+    const value = Number(rawWallet[field]);
+    if (!Number.isFinite(value) || value < 0 || value > 1e15) return bad("Saldo utente non valido.");
+    wallet[field] = value;
+  }
+  let withdrawalWallets = settings.withdraw_wallets;
+  if (typeof withdrawalWallets === "string") { try { withdrawalWallets = JSON.parse(withdrawalWallets || "{}"); } catch { return bad("Indirizzi di prelievo non validi: usa un JSON valido."); } }
+  if (!withdrawalWallets || typeof withdrawalWallets !== "object" || Array.isArray(withdrawalWallets)) return bad("Indirizzi di prelievo non validi.");
+  const cleanedWallets = {};
+  for (const [network,address] of Object.entries(withdrawalWallets)) {
+    if (!/^[a-z0-9_-]{1,24}$/i.test(network) || typeof address !== "string" || address.length > 256) return bad("Indirizzi di prelievo non validi.");
+    cleanedWallets[network] = address.trim();
+  }
+  if (typeof settings.notifications !== "boolean") return bad("Preferenze notifiche non valide.");
+  const oldWallet = await env.DB.prepare("SELECT deposit,earnings,total_deposited,total_earned,total_withdrawn FROM wallets WHERE user_id=?").bind(id).first() || { deposit:0,earnings:0,total_deposited:0,total_earned:0,total_withdrawn:0 };
+  const now = Date.now(), adminId = request.headers.get("x-websim-user-id") || null;
+  const statements = [
+    env.DB.prepare("UPDATE users SET username=?,identifier=?,email_verified=? WHERE id=?").bind(username,identifier,profile.email_verified?1:0,id),
+    env.DB.prepare("UPDATE support_messages SET account_username=? WHERE account_id=?").bind(username,id),
+    env.DB.prepare("INSERT INTO wallets (user_id,deposit,earnings,total_deposited,total_earned,total_withdrawn) VALUES (?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET deposit=excluded.deposit,earnings=excluded.earnings,total_deposited=excluded.total_deposited,total_earned=excluded.total_earned,total_withdrawn=excluded.total_withdrawn").bind(id,wallet.deposit,wallet.earnings,wallet.total_deposited,wallet.total_earned,wallet.total_withdrawn),
+    env.DB.prepare("INSERT INTO settings (user_id,withdraw_wallets,notifications) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET withdraw_wallets=excluded.withdraw_wallets,notifications=excluded.notifications").bind(id,JSON.stringify(cleanedWallets),settings.notifications?1:0)
+  ];
+  if (Number(current.email_verified || 0) !== (profile.email_verified ? 1 : 0)) statements.push(env.DB.prepare("UPDATE email_verifications SET status=?,otp_hash=NULL,otp_expires=NULL,attempts=0,updated_at=? WHERE user_id=?").bind(profile.email_verified ? "verified" : "pending",now,id));
+  for (const field of fields) {
+    const oldValue = Number(oldWallet[field] || 0);
+    if (oldValue !== wallet[field]) statements.push(env.DB.prepare("INSERT INTO admin_balance_adjustments (user_id,field,old_value,new_value,created_at,admin_id) VALUES (?,?,?,?,?,?)").bind(id,field,oldValue,wallet[field],now,adminId));
+  }
+  await env.DB.batch(statements);
+  return Response.json({ ok:true });
+}
 
 // Render / Express adapter. Worker-style route handlers above are retained,
 // backed by Turso in production and a local libSQL file for development.
