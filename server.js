@@ -402,6 +402,29 @@ const websimWorker = {
         otp_expires INTEGER,
         attempts INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS kyc_submissions (
+        account_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        birth_date TEXT NOT NULL,
+        nationality TEXT NOT NULL,
+        document_type TEXT NOT NULL,
+        document_number TEXT NOT NULL,
+        document_expiry TEXT NOT NULL,
+        front_blob_url TEXT NOT NULL,
+        front_mime TEXT NOT NULL,
+        back_blob_url TEXT NOT NULL,
+        back_mime TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        reviewed_at INTEGER,
+        reviewer_id TEXT,
+        admin_note TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS kyc_submissions_status ON kyc_submissions (status, created_at);
+      CREATE TABLE IF NOT EXISTS kyc_keyring (key_id TEXT PRIMARY KEY, secret_b64 TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (
         token TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -594,6 +617,11 @@ const websimWorker = {
       if (method === "POST" && path === "/api/password-recovery/reset") return await resetPasswordWithOtp(request, env);
       if (method === "POST" && path === "/api/logout") return await logout(request, env);
       if (method === "GET" && path === "/api/me") return await me(request, env);
+      if (method === "GET" && path === "/api/kyc") return await getKycStatus(request, env);
+      if (method === "POST" && path === "/api/kyc") return await submitKyc(request, env);
+      if (method === "GET" && path === "/api/admin/kyc") return await getAdminKyc(request, env);
+      if (method === "GET" && path === "/api/admin/kyc-image") return await getAdminKycImage(request, env);
+      if (method === "POST" && path === "/api/admin/kyc-review") return await reviewKyc(request, env);
       if (method === "GET" && path === "/api/email-verification") return await getEmailVerification(request, env);
       if (method === "POST" && path === "/api/email-verification/request") return await requestEmailVerification(request, env);
       if (method === "POST" && path === "/api/email-verification/verify") return await verifyEmailCode(request, env);
@@ -1209,6 +1237,78 @@ async function verifyEmailCode(request, env) {
   ]);
   return Response.json({ ok: true, verified: true });
 }
+function encodeKycKey(bytes) { let raw=""; for (const byte of bytes) raw+=String.fromCharCode(byte); return btoa(raw); }
+async function getKycCryptoKey(env) {
+  let row=await env.DB.prepare("SELECT secret_b64 FROM kyc_keyring WHERE key_id='documents-v1'").first();
+  if(!row){const raw=crypto.getRandomValues(new Uint8Array(32));await env.DB.prepare("INSERT OR IGNORE INTO kyc_keyring (key_id,secret_b64) VALUES ('documents-v1',?)").bind(encodeKycKey(raw)).run();row=await env.DB.prepare("SELECT secret_b64 FROM kyc_keyring WHERE key_id='documents-v1'").first();}
+  if(!row?.secret_b64)throw new Error("Chiave di protezione KYC non disponibile.");
+  const decoded=atob(row.secret_b64),raw=Uint8Array.from(decoded,char=>char.charCodeAt(0));
+  if(raw.length!==32)throw new Error("Chiave di protezione KYC non valida.");
+  return crypto.subtle.importKey("raw",raw,{name:"AES-GCM"},false,["encrypt","decrypt"]);
+}
+function kycImageType(bytes) {
+  if(bytes.length>=3&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255)return "image/jpeg";
+  if(bytes.length>=8&&bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71&&bytes[4]===13&&bytes[5]===10&&bytes[6]===26&&bytes[7]===10)return "image/png";
+  if(bytes.length>=12&&String.fromCharCode(...bytes.slice(0,4))==="RIFF"&&String.fromCharCode(...bytes.slice(8,12))==="WEBP")return "image/webp";
+  return "";
+}
+async function storeEncryptedKycImage(env,file,key) {
+  const bytes=new Uint8Array(await file.arrayBuffer()),mime=kycImageType(bytes);
+  if(!mime||mime!==file.type)return {error:"Carica immagini JPG, PNG o WebP valide."};
+  const iv=crypto.getRandomValues(new Uint8Array(12)),encrypted=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,bytes));
+  const packed=new Uint8Array(iv.length+encrypted.length);packed.set(iv);packed.set(encrypted,iv.length);
+  const stored=await env.BLOB.put("kyc-"+crypto.randomUUID()+".enc",packed,{contentType:"application/octet-stream"});
+  return {url:stored.url,mime};
+}
+async function getKycStatus(request,env) {
+  const user=await sessionUser(request,env);if(!user)return Response.json({error:"Accedi per richiedere la verifica KYC."},{status:401});
+  const row=await env.DB.prepare("SELECT status,created_at,reviewed_at,admin_note FROM kyc_submissions WHERE account_id=?").bind(user.id).first();
+  return Response.json({request:row||null});
+}
+async function submitKyc(request,env) {
+  const user=await sessionUser(request,env);if(!user)return Response.json({error:"Accedi per richiedere la verifica KYC."},{status:401});
+  if(!env.BLOB?.put)return Response.json({error:"Archivio documenti protetto non disponibile."},{status:503});
+  const contentLength=Number(request.headers.get("content-length")||0);if(contentLength>11*1024*1024)return Response.json({error:"Richiesta KYC troppo grande."},{status:413});
+  const existing=await env.DB.prepare("SELECT status FROM kyc_submissions WHERE account_id=?").bind(user.id).first();
+  if(existing&&existing.status!=="rejected")return Response.json({error:existing.status==="approved"?"La tua identità è già verificata.":"Hai già una richiesta KYC in attesa."},{status:409});
+  let form;try{form=await request.formData();}catch{return bad("Modulo KYC non valido.");}
+  const fullName=String(form.get("full_name")||"").trim(),birthDate=String(form.get("birth_date")||""),nationality=String(form.get("nationality")||"").trim(),docType=String(form.get("document_type")||""),docNumber=String(form.get("document_number")||"").trim(),expiry=String(form.get("document_expiry")||"");
+  const validDate=value=>/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(Date.parse(value+"T00:00:00.000Z"))&&new Date(value+"T00:00:00.000Z").toISOString().slice(0,10)===value;
+  const today=new Date().toISOString().slice(0,10);
+  if(fullName.length<2||fullName.length>120||nationality.length<2||nationality.length>80||!validDate(birthDate)||birthDate>=today||!validDate(expiry)||expiry<today||!/^[A-Za-z0-9][A-Za-z0-9 -]{1,39}$/.test(docNumber))return bad("Controlla i dati anagrafici e del documento.");
+  if(!["passport","id_card","driving_license"].includes(docType))return bad("Tipo di documento non valido.");
+  const front=form.get("front_image"),back=form.get("back_image");
+  if(!front||typeof front.arrayBuffer!=="function"||!back||typeof back.arrayBuffer!=="function")return bad("Allega fronte e retro del documento.");
+  if(front.size<1||back.size<1||front.size>5*1024*1024||back.size>5*1024*1024)return bad("Ogni immagine deve pesare al massimo 5 MB.");
+  const key=await getKycCryptoKey(env),frontImage=await storeEncryptedKycImage(env,front,key),backImage=await storeEncryptedKycImage(env,back,key);
+  if(frontImage.error||backImage.error)return bad(frontImage.error||backImage.error);
+  const now=Date.now(),platformUserId=request.headers.get("x-websim-user-id")||user.id;
+  const saved=await env.DB.prepare("INSERT INTO kyc_submissions (account_id,user_id,username,full_name,birth_date,nationality,document_type,document_number,document_expiry,front_blob_url,front_mime,back_blob_url,back_mime,status,created_at,updated_at,reviewed_at,reviewer_id,admin_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,NULL,NULL,'') ON CONFLICT(account_id) DO UPDATE SET user_id=excluded.user_id,username=excluded.username,full_name=excluded.full_name,birth_date=excluded.birth_date,nationality=excluded.nationality,document_type=excluded.document_type,document_number=excluded.document_number,document_expiry=excluded.document_expiry,front_blob_url=excluded.front_blob_url,front_mime=excluded.front_mime,back_blob_url=excluded.back_blob_url,back_mime=excluded.back_mime,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,reviewed_at=NULL,reviewer_id=NULL,admin_note='' WHERE kyc_submissions.status='rejected'").bind(user.id,platformUserId,user.username,fullName,birthDate,nationality,docType,docNumber,expiry,frontImage.url,frontImage.mime,backImage.url,backImage.mime,now,now).run();
+  if(!Number(saved.meta?.changes||0))return Response.json({error:"La richiesta KYC è già stata inviata."},{status:409});
+  return Response.json({ok:true,status:"pending"});
+}
+async function getAdminKyc(request,env) {
+  const access=await requireAdminPermission(request,env,"kyc");if(!access)return Response.json({error:"Permesso KYC mancante."},{status:403});
+  const rows=await env.DB.prepare("SELECT account_id,username,full_name,birth_date,nationality,document_type,document_number,document_expiry,status,created_at,reviewed_at,admin_note FROM kyc_submissions ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,created_at DESC LIMIT 300").all();
+  return Response.json({requests:rows.results||[]});
+}
+async function getAdminKycImage(request,env) {
+  const access=await requireAdminPermission(request,env,"kyc");if(!access)return Response.json({error:"Permesso KYC mancante."},{status:403});
+  const url=new URL(request.url),accountId=url.searchParams.get("account_id")||"",side=url.searchParams.get("side");if(!accountId||accountId.length>128||!["front","back"].includes(side))return bad("Immagine KYC non valida.");
+  const row=await env.DB.prepare("SELECT front_blob_url,front_mime,back_blob_url,back_mime FROM kyc_submissions WHERE account_id=?").bind(accountId).first();if(!row)return Response.json({error:"Richiesta KYC non trovata."},{status:404});
+  const blobUrl=side==="front"?row.front_blob_url:row.back_blob_url,mime=side==="front"?row.front_mime:row.back_mime,stored=env.BLOB?.get?await env.BLOB.get(blobUrl):await fetch(blobUrl);if(!stored.ok)return Response.json({error:"Immagine documento non disponibile."},{status:502});
+  const packed=new Uint8Array(await stored.arrayBuffer());if(packed.length<29)return Response.json({error:"Immagine documento non valida."},{status:502});
+  const key=await getKycCryptoKey(env),plain=await crypto.subtle.decrypt({name:"AES-GCM",iv:packed.slice(0,12)},key,packed.slice(12));
+  return new Response(plain,{headers:{"Content-Type":mime,"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff","Content-Disposition":"inline"}});
+}
+async function reviewKyc(request,env) {
+  const access=await requireAdminPermission(request,env,"kyc");if(!access)return Response.json({error:"Permesso KYC mancante."},{status:403});
+  let body;try{body=await request.json();}catch{return bad("Decisione KYC non valida.");}
+  const accountId=String(body.account_id||""),status=String(body.status||""),note=String(body.note||"").trim();if(!accountId||accountId.length>128||!["approved","rejected"].includes(status)||note.length>500)return bad("Decisione KYC non valida.");
+  const now=Date.now(),result=await env.DB.prepare("UPDATE kyc_submissions SET status=?,updated_at=?,reviewed_at=?,reviewer_id=?,admin_note=? WHERE account_id=? AND status='pending'").bind(status,now,now,access.userId,note,accountId).run();
+  if(!Number(result.meta?.changes||0))return Response.json({error:"Richiesta KYC non trovata o già esaminata."},{status:409});
+  return Response.json({ok:true,status});
+}
 async function adminEmailVerifications(request, env) {
   const adminAccess = await requireAdminPermission(request, env, "verification");
   if (!adminAccess) return Response.json({ error: "Permesso amministratore mancante." }, { status: 403 });
@@ -1311,7 +1411,7 @@ async function replySupportMessage(request, env) {
   await env.DB.prepare("INSERT INTO support_messages (user_id, account_id, account_username, sender, body, created_at) VALUES (?, ?, ?, 'admin', ?, ?)").bind(ownerId, accountId, conversation.account_username, message, Date.now()).run();
   return Response.json({ ok: true });
 }
-const ADMIN_PERMISSIONS = ["overview","support","users","deposits","withdrawals","investments","wallets","verification","deposit-requests","withdrawal-requests","servers","compute-requests"];
+const ADMIN_PERMISSIONS = ["overview","support","users","deposits","withdrawals","investments","wallets","verification","kyc","deposit-requests","withdrawal-requests","servers","compute-requests"];
 async function getAdminAccess(request, env) {
   if (isProjectOwner(request)) return { owner: true, userId: request.headers.get("x-websim-user-id"), permissions: ADMIN_PERMISSIONS.slice() };
   const user = await sessionUser(request, env);
@@ -1365,6 +1465,7 @@ async function adminRequestCounts(request, env) {
     "(SELECT COUNT(*) FROM account_requests WHERE kind='withdrawal' AND status='pending') AS withdrawal_requests, " +
     "(SELECT COUNT(*) FROM compute_rentals WHERE status='pending') AS compute_requests, " +
     "(SELECT COUNT(*) FROM email_verifications WHERE status IN ('pending','code_sent')) AS email_verifications, " +
+    "(SELECT COUNT(*) FROM kyc_submissions WHERE status='pending') AS kyc_requests, " +
     "(SELECT COUNT(*) FROM server_instances WHERE status='pending') AS servers, " +
     "(SELECT COUNT(*) FROM (SELECT account_id, MAX(id) AS latest_id FROM support_messages GROUP BY account_id) latest " +
       "JOIN support_messages m ON m.id=latest.latest_id WHERE m.sender='user') AS support_messages"
@@ -1375,6 +1476,7 @@ async function adminRequestCounts(request, env) {
     withdrawalRequests: allowed("withdrawal-requests") ? Number(row?.withdrawal_requests || 0) : 0,
     computeRequests: allowed("compute-requests") ? Number(row?.compute_requests || 0) : 0,
     emailVerifications: allowed("verification") ? Number(row?.email_verifications || 0) : 0,
+    kyc: allowed("kyc") ? Number(row?.kyc_requests || 0) : 0,
     servers: allowed("servers") ? Number(row?.servers || 0) : 0,
     support: allowed("support") ? Number(row?.support_messages || 0) : 0
   }});
@@ -1505,6 +1607,7 @@ import { createClient } from '@libsql/client';
 import { createHmac, timingSafeEqual, webcrypto } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const configuredDatabaseUrl = (process.env.TURSO_DATABASE_URL || '').trim();
@@ -1539,11 +1642,17 @@ function makeD1Adapter(client) {
     }
   };
 }
-const env = { DB: makeD1Adapter(libsql), TURSO_DB_BOUND: true };
+const KYC_STORAGE_DIR = process.env.KYC_STORAGE_DIR || process.env.RENDER_DISK_PATH || path.join(__dirname, '.kyc-private');
+const kycBlobStore = {
+  async put(name, data) { const file=path.basename(String(name)).replace(/[^a-zA-Z0-9_.-]/g,'_'); await fs.mkdir(KYC_STORAGE_DIR,{recursive:true}); await fs.writeFile(path.join(KYC_STORAGE_DIR,file),Buffer.from(data)); return {url:'kyc-private://'+file}; },
+  async get(url) { const file=path.basename(String(url).replace(/^kyc-private:\/\//,'')); const bytes=await fs.readFile(path.join(KYC_STORAGE_DIR,file)); return new Response(bytes,{headers:{'Content-Type':'application/octet-stream'}}); }
+};
+const env = { DB: makeD1Adapter(libsql), BLOB: kycBlobStore, TURSO_DB_BOUND: true };
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
+app.use('/api/kyc', express.raw({ type: () => true, limit: '11mb' }));
 const ADMIN_COOKIE = 'nexa_render_admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || process.env.ADMIN_PASSWORD || 'configure-SESSION_SECRET-before-production';
 function signAdmin(payload) { return createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url'); }
@@ -1607,7 +1716,7 @@ app.all('/api/*', async (req, res) => {
     const hasBody = !['GET', 'HEAD'].includes(method) && req.body !== undefined;
     if (hasBody && !headers.has('content-type')) headers.set('content-type', 'application/json');
     const origin = req.protocol + '://' + req.get('host');
-    const request = new Request(origin + req.originalUrl, { method, headers, ...(hasBody ? { body: JSON.stringify(req.body) } : {}) });
+    const request = new Request(origin + req.originalUrl, { method, headers, ...(hasBody ? { body: Buffer.isBuffer(req.body) ? req.body : JSON.stringify(req.body) } : {}) });
     const response = await websimWorker.fetch(request, env);
     res.status(response.status);
     response.headers.forEach((value, name) => res.setHeader(name, value));
