@@ -233,36 +233,20 @@ async function accrue(env, userId) {
 
 async function accrueServerEarnings(env, userId) {
   await env.DB.prepare("INSERT OR IGNORE INTO wallets (user_id, deposit, earnings, total_deposited, total_earned, total_withdrawn) VALUES (?,0,0,0,0,0)").bind(userId).run();
-  const rows = (await env.DB.prepare("SELECT s.purchase_id,s.status,s.updated_at,s.active_since,s.yield_total,s.credited_yield,s.active_seconds,s.server_balance,p.product_id,p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.user_id=?").bind(userId).all()).results || [];
+  const rows = (await env.DB.prepare("SELECT s.purchase_id,s.status,s.updated_at,s.active_since,s.yield_total,s.credited_yield,p.product_id FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.user_id=?").bind(userId).all()).results || [];
   const now = Date.now();
   for (const row of rows) {
-    if (row.status !== "active") continue;
     const daily = COMPUTE_CATALOG.get(row.product_id)?.daily || 0;
-    const monthlyCost = Math.max(0, Number(row.price || 0)) / 30;
-    const costPerSecond = monthlyCost / 86400;
-    const balance = Math.max(0, Number(row.server_balance || 0));
-    const activeSince = Number(row.active_since || row.updated_at || now);
-    const elapsed = Math.max(0, (now - activeSince) / 1000);
-    const affordableSeconds = costPerSecond > 0 ? balance / costPerSecond : 0;
-    const billedSeconds = Math.min(elapsed, affordableSeconds);
-    const exhausted = affordableSeconds <= elapsed + 1e-7;
-    const newBalance = Math.max(0, balance - billedSeconds * costPerSecond);
-    const total = Number(row.yield_total || 0) + daily * billedSeconds / 86400;
+    const activeSince = row.status === "active" ? Number(row.active_since || row.updated_at || now) : 0;
+    const total = Number(row.yield_total || 0) + (activeSince ? daily * Math.max(0, now - activeSince) / DAY : 0);
     const credited = Number(row.credited_yield || 0);
     const delta = total - credited;
-    const activeSeconds = Number(row.active_seconds || 0) + billedSeconds;
-    const nextStatus = exhausted ? "offline" : "active";
-    const nextActiveSince = exhausted ? null : now;
-    const update = env.DB.prepare("UPDATE server_instances SET status=?,updated_at=?,yield_total=?,active_seconds=?,active_since=?,server_balance=?,credited_yield=? WHERE purchase_id=? AND user_id=? AND status='active' AND active_since IS ? AND server_balance IS ?")
-      .bind(nextStatus, now, total, activeSeconds, nextActiveSince, newBalance, total, row.purchase_id, userId, row.active_since, row.server_balance);
     if (delta > 1e-10) {
       await env.DB.batch([
-        update,
+        env.DB.prepare("UPDATE server_instances SET credited_yield=? WHERE purchase_id=? AND credited_yield=?").bind(total, row.purchase_id, credited),
         env.DB.prepare("UPDATE wallets SET earnings=earnings+?, total_earned=total_earned+? WHERE user_id=? AND changes()>0").bind(delta, delta, userId),
         env.DB.prepare("INSERT INTO earning_credits (user_id, investment_id, amount, created_at, earning_type, server_purchase_id) SELECT ?,0,?,?,'server',? WHERE changes()>0").bind(userId, delta, now, row.purchase_id)
       ]);
-    } else {
-      await update.run();
     }
   }
 }
@@ -388,12 +372,14 @@ const websimWorker = {
       if (method === "GET" && path === "/api/pwa-manifest") return new Response(JSON.stringify({ name: "Nexa Compute", short_name: "Nexa", id: "/", start_url: "/", scope: "/", display: "standalone", background_color: "#0b1020", theme_color: "#0b1020", icons: [{ src: "/api/pwa-icon", sizes: "192x192", type: "image/svg+xml", purpose: "any" }, { src: "/api/pwa-icon", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }] }), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" } });
       if (method === "GET" && path === "/api/pwa-icon") return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b1020"/><rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="#c39a46" stroke-width="10"/><text x="256" y="302" text-anchor="middle" font-family="Arial,sans-serif" font-size="190" font-weight="800" fill="#e8c876">NX</text></svg>`, { headers: { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
       if (method === "GET" && path === "/api/pwa-worker") return new Response(`self.addEventListener("install",event=>event.waitUntil(self.skipWaiting()));self.addEventListener("activate",event=>event.waitUntil(self.clients.claim()));`, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/", "Cache-Control": "no-cache" } });
-    const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
-    if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
-    let tursoDB;
-    try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
-    catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
-    env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
+    if (!env.TURSO_DB_BOUND) {
+      const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
+      if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
+      let tursoDB;
+      try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
+      catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
+      env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
+    }
     await env.DB.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -543,8 +529,7 @@ const websimWorker = {
         yield_total REAL NOT NULL DEFAULT 0,
         active_seconds REAL NOT NULL DEFAULT 0,
         active_since INTEGER,
-        credited_yield REAL NOT NULL DEFAULT 0,
-        server_balance REAL NOT NULL DEFAULT 0
+        credited_yield REAL NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS server_instances_user ON server_instances (user_id, status);
       CREATE TABLE IF NOT EXISTS server_maintenance_payments (
@@ -606,7 +591,6 @@ const websimWorker = {
     if (!serverColumns.some(column => column.name === "active_seconds")) await env.DB.prepare("ALTER TABLE server_instances ADD COLUMN active_seconds REAL NOT NULL DEFAULT 0").run();
     if (!serverColumns.some(column => column.name === "active_since")) await env.DB.prepare("ALTER TABLE server_instances ADD COLUMN active_since INTEGER").run();
     if (!serverColumns.some(column => column.name === "credited_yield")) await env.DB.prepare("ALTER TABLE server_instances ADD COLUMN credited_yield REAL NOT NULL DEFAULT 0").run();
-    if (!serverColumns.some(column => column.name === "server_balance")) await env.DB.prepare("ALTER TABLE server_instances ADD COLUMN server_balance REAL NOT NULL DEFAULT 0").run();
     const earningColumns = (await env.DB.prepare("PRAGMA table_info(earning_credits)").all()).results || [];
     if (!earningColumns.some(column => column.name === "earning_type")) await env.DB.prepare("ALTER TABLE earning_credits ADD COLUMN earning_type TEXT NOT NULL DEFAULT 'investment'").run();
     if (!earningColumns.some(column => column.name === "server_purchase_id")) await env.DB.prepare("ALTER TABLE earning_credits ADD COLUMN server_purchase_id TEXT").run();
@@ -678,7 +662,6 @@ const websimWorker = {
       if (method === "POST" && path === "/api/admin/deposit-addresses") return await saveAdminDepositAddresses(request, env);
       if (method === "POST" && path === "/api/admin/review-rental") return await reviewRental(request, env);
       if (method === "GET" && path === "/api/servers") return await getServers(request, env);
-      if (method === "POST" && path === "/api/servers/recharge") return await rechargeUserServer(request, env);
       if (method === "POST" && path === "/api/servers/restore") return await restoreUserServer(request, env);
       if (method === "POST" && path === "/api/admin/server-status") return await setServerStatus(request, env);
       if (method === "POST" && path === "/api/admin/review-account-request") return await reviewAccountRequest(request, env);
@@ -747,18 +730,14 @@ async function findRecoveryAccount(env, identifier) {
 }
 async function requestPasswordRecovery(request,env) {
   let body;try{body=await request.json();}catch{return bad("Inserisci il tuo account.");}
-  const identifier=recoveryIdentifier(body);
-  if(!identifier) return bad("Inserisci un identificativo valido.");
-  const account=await findRecoveryAccount(env,identifier);
-  if(!account?.recovery_email) return Response.json({ok:true});
-  const now=Date.now();
-  const previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
-  if(previous?.email===account.recovery_email&&previous.status==="recovery_code_sent"&&Number(previous.otp_expires||0)>now) return Response.json({ok:true});
-  if(previous?.email===account.recovery_email&&previous.status==="recovery_pending"&&now-Number(previous.updated_at||0)<60000) return Response.json({ok:true});
+  const identifier=recoveryIdentifier(body);if(!identifier)return bad("Inserisci un identificativo valido.");
+  const account=await findRecoveryAccount(env,identifier);if(!account?.recovery_email)return Response.json({ok:true});
+  const now=Date.now(),previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
+  if(previous?.email===account.recovery_email&&previous.status==="recovery_code_sent"&&Number(previous.otp_expires||0)>now)return Response.json({ok:true});
+  if(previous?.email===account.recovery_email&&previous.status==="recovery_pending"&&now-Number(previous.updated_at||0)<60000)return Response.json({ok:true});
   await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'recovery_pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='recovery_pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(account.id,account.recovery_email,now,now).run();
   return Response.json({ok:true});
 }
-
 async function resetPasswordWithOtp(request,env) {
   let body;try{body=await request.json();}catch{return bad("Dati di recupero non validi.");}
   const identifier=recoveryIdentifier(body),code=String(body.code||"").trim(),next=typeof body.password==="string"?body.password:"";
@@ -1123,49 +1102,18 @@ async function getServers(request, env) {
   const user = await sessionUser(request, env);
   if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
   await accrueServerEarnings(env, user.id);
-  const rows = (await env.DB.prepare("SELECT p.id AS purchase_id,p.product_id,p.price,p.purchased_at,s.status,s.updated_at,s.yield_total,s.active_seconds,s.active_since,s.server_balance FROM compute_purchases p JOIN server_instances s ON s.purchase_id=p.id WHERE p.user_id=? ORDER BY p.purchased_at DESC").bind(user.id).all()).results || [];
+  const rows = (await env.DB.prepare("SELECT p.id AS purchase_id, p.product_id, p.price, p.purchased_at, s.status, s.updated_at, s.yield_total, s.active_seconds, s.active_since FROM compute_purchases p JOIN server_instances s ON s.purchase_id=p.id WHERE p.user_id=? ORDER BY p.purchased_at DESC").bind(user.id).all()).results || [];
   const now = Date.now();
   const servers = rows.map(row => {
     const model = COMPUTE_CATALOG.get(row.product_id) || { daily: 0 };
-    const price = Math.max(0, Number(row.price || 0));
-    const monthlyCost = price / 30;
-    const costPerSecond = monthlyCost / 86400;
     const activeSince = row.status === "active" ? Number(row.active_since || row.updated_at) : null;
-    const elapsed = activeSince ? Math.max(0, (now - activeSince) / 1000) : 0;
-    const balance = Math.max(0, Number(row.server_balance || 0));
-    const runningSeconds = Math.min(elapsed, costPerSecond > 0 ? balance / costPerSecond : 0);
-    const exhausted = row.status === "active" && runningSeconds + 1e-7 >= (costPerSecond > 0 ? balance / costPerSecond : 0);
+    const runningSeconds = activeSince ? Math.max(0, (now - activeSince) / 1000) : 0;
     const activeSeconds = Number(row.active_seconds || 0) + runningSeconds;
-    const totalYield = Number(row.yield_total || 0) + model.daily * runningSeconds / 86400;
-    const liveBalance = Math.max(0, balance - runningSeconds * costPerSecond);
-    return { ...row, status: exhausted ? "offline" : row.status, server_balance: liveBalance, balance_days: monthlyCost > 0 ? liveBalance / monthlyCost : 0, total_yield: totalYield, active_seconds: activeSeconds, maintenance_fee: Math.round(price * 5) / 100 };
+    const totalYield = Number(row.yield_total || 0) + model.daily * activeSeconds / 86400;
+    return { ...row, total_yield: totalYield, active_seconds: activeSeconds, maintenance_fee: Math.round(Number(row.price || 0) * 5) / 100 };
   });
-  const payments = (await env.DB.prepare("SELECT id,purchase_id,amount,created_at,maintenance_started_at FROM server_maintenance_payments WHERE user_id=? ORDER BY created_at DESC").bind(user.id).all()).results || [];
+  const payments = (await env.DB.prepare("SELECT id, purchase_id, amount, created_at, maintenance_started_at FROM server_maintenance_payments WHERE user_id=? ORDER BY created_at DESC").bind(user.id).all()).results || [];
   return Response.json({ servers, maintenance_payments: payments });
-}
-async function rechargeUserServer(request, env) {
-  const user = await sessionUser(request, env);
-  if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
-  let body;
-  try { body = await request.json(); } catch { return bad("Ricarica non valida."); }
-  const purchaseId = typeof body.purchase_id === "string" ? body.purchase_id.trim() : "";
-  const amount = Math.round(Number(body.amount) * 100) / 100;
-  if (!purchaseId || purchaseId.length > 128 || !Number.isFinite(amount) || amount <= 0 || amount > 1e9) return bad("Importo di ricarica non valido.");
-  await accrueServerEarnings(env, user.id);
-  const server = await env.DB.prepare("SELECT purchase_id FROM server_instances WHERE purchase_id=? AND user_id=?").bind(purchaseId, user.id).first();
-  if (!server) return Response.json({ error: "Server non trovato." }, { status: 404 });
-  const now = Date.now();
-  const result = await env.DB.batch([
-    env.DB.prepare("UPDATE wallets SET deposit=deposit-? WHERE user_id=? AND deposit>=? AND EXISTS (SELECT 1 FROM server_instances WHERE purchase_id=? AND user_id=?)").bind(amount, user.id, amount, purchaseId, user.id),
-    env.DB.prepare("UPDATE server_instances SET server_balance=server_balance+?,status='active',updated_at=?,updated_by=?,active_since=CASE WHEN status='active' THEN COALESCE(active_since,?) ELSE ? END WHERE purchase_id=? AND user_id=? AND changes()>0").bind(amount, now, user.id, now, now, purchaseId, user.id)
-  ]);
-  if (!result[0]?.meta?.changes) return Response.json({ error: "Saldo deposito insufficiente per ricaricare questo server." }, { status: 400 });
-  if (!result[1]?.meta?.changes) return Response.json({ error: "Server non aggiornato. Aggiorna e riprova." }, { status: 409 });
-  const [wallet, updated] = await Promise.all([
-    env.DB.prepare("SELECT deposit FROM wallets WHERE user_id=?").bind(user.id).first(),
-    env.DB.prepare("SELECT server_balance,status FROM server_instances WHERE purchase_id=? AND user_id=?").bind(purchaseId, user.id).first()
-  ]);
-  return Response.json({ ok: true, purchase_id: purchaseId, amount, server_balance: Number(updated?.server_balance || 0), status: updated?.status || "active", deposit_balance: Number(wallet?.deposit || 0) });
 }
 async function restoreMaintenanceServer(env, userId, purchaseId, actorId) {
   const current = await env.DB.prepare("SELECT s.status, s.updated_at, p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=? AND s.user_id=?").bind(purchaseId, userId).first();
@@ -1178,7 +1126,7 @@ async function restoreMaintenanceServer(env, userId, purchaseId, actorId) {
   const result = await env.DB.batch([
     env.DB.prepare("INSERT INTO server_maintenance_payments (user_id,purchase_id,maintenance_started_at,amount,created_at) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM server_instances WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=?) AND EXISTS (SELECT 1 FROM wallets WHERE user_id=? AND deposit>=?) AND NOT EXISTS (SELECT 1 FROM server_maintenance_payments WHERE purchase_id=? AND maintenance_started_at=?)").bind(userId,purchaseId,cycleAt,fee,now,purchaseId,userId,cycleAt,userId,fee,purchaseId,cycleAt),
     env.DB.prepare("UPDATE wallets SET deposit=deposit-? WHERE user_id=? AND deposit>=? AND EXISTS (SELECT 1 FROM server_maintenance_payments WHERE user_id=? AND purchase_id=? AND maintenance_started_at=? AND created_at=?) AND EXISTS (SELECT 1 FROM server_instances WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=?)").bind(fee,userId,fee,userId,purchaseId,cycleAt,now,purchaseId,userId,cycleAt),
-    env.DB.prepare("UPDATE server_instances SET status='active',server_balance=server_balance+?,updated_at=?,updated_by=?,active_since=? WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=? AND EXISTS (SELECT 1 FROM server_maintenance_payments WHERE user_id=? AND purchase_id=? AND maintenance_started_at=? AND created_at=?)").bind(fee,now,actorId,now,purchaseId,userId,cycleAt,userId,purchaseId,cycleAt,now)
+    env.DB.prepare("UPDATE server_instances SET status='active',updated_at=?,updated_by=?,active_since=? WHERE purchase_id=? AND user_id=? AND status='maintenance' AND updated_at=? AND EXISTS (SELECT 1 FROM server_maintenance_payments WHERE user_id=? AND purchase_id=? AND maintenance_started_at=? AND created_at=?)").bind(now,actorId,now,purchaseId,userId,cycleAt,userId,purchaseId,cycleAt,now)
   ]);
   if (!result[0]?.meta?.changes) return { error: "Il server è già stato ripristinato oppure il saldo è insufficiente.", status: 409, fee };
   if (!result[1]?.meta?.changes || !result[2]?.meta?.changes) return { error: "Impossibile completare il pagamento di manutenzione. Aggiorna la pagina e riprova.", status: 409, fee };
@@ -1204,12 +1152,8 @@ async function setServerStatus(request, env) {
   const purchaseId = typeof body.purchase_id === "string" ? body.purchase_id.trim() : "";
   const status = body.status;
   if (!purchaseId || !["active", "offline", "pending", "maintenance"].includes(status)) return bad("Stato server non valido.");
-  let current = await env.DB.prepare("SELECT s.user_id,s.status,s.updated_at,s.active_since,s.yield_total,s.active_seconds,s.credited_yield,s.server_balance,p.product_id,p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=?").bind(purchaseId).first();
+  const current = await env.DB.prepare("SELECT s.user_id,s.status,s.updated_at,s.active_since,s.yield_total,s.active_seconds,s.credited_yield,p.product_id,p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=?").bind(purchaseId).first();
   if (!current) return Response.json({ error: "Acquisto server non trovato." }, { status: 404 });
-  if (current.status === "active") {
-    await accrueServerEarnings(env, current.user_id);
-    current = await env.DB.prepare("SELECT s.user_id,s.status,s.updated_at,s.active_since,s.yield_total,s.active_seconds,s.credited_yield,s.server_balance,p.product_id,p.price FROM server_instances s JOIN compute_purchases p ON p.id=s.purchase_id WHERE s.purchase_id=?").bind(purchaseId).first();
-  }
   const nextProduct = body.product_id === undefined ? current.product_id : String(body.product_id);
   if (!COMPUTE_CATALOG.has(nextProduct)) return bad("Modello non valido.");
   const nextPrice = body.price === undefined ? Number(current.price) : Number(body.price);
@@ -1220,7 +1164,10 @@ async function setServerStatus(request, env) {
     if (!Number.isFinite(raw) || raw < 0 || raw > 1e15) return bad("Dati server non validi.");
     values[key] = raw;
   }
-  if (status === "active" && current.status !== "active" && Number(current.server_balance || 0) <= 0) return bad("Ricarica il saldo del server prima di attivarlo.");
+  if (current.status === "maintenance" && status === "active") {
+    const restored = await restoreMaintenanceServer(env, current.user_id, purchaseId, request.headers.get("x-websim-user-id"));
+    if (!restored.ok) return Response.json({ error: restored.error }, { status: restored.status });
+  }
   const now = Date.now();
   let yieldTotal = Number(current.yield_total || 0), activeSeconds = Number(current.active_seconds || 0);
   let activeSince = current.status === "active" ? Number(current.active_since || current.updated_at || now) : null;
@@ -1263,7 +1210,6 @@ async function requestEmailVerification(request, env) {
   await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(user.id,email,now,now).run();
   return Response.json({ok:true,status:"pending"});
 }
-
 async function verifyEmailCode(request, env) {
   const user = await sessionUser(request, env);
   if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
@@ -1371,20 +1317,18 @@ async function adminEmailVerifications(request, env) {
 }
 async function generateEmailOtp(request, env) {
   const access=await requireAdminPermission(request,env,"verification");
-  if(!access) return Response.json({error:"Permesso amministratore mancante."},{status:403});
+  if(!access)return Response.json({error:"Permesso amministratore mancante."},{status:403});
   const body=await request.json(),userId=String(body.id||"");
   const row=await env.DB.prepare("SELECT e.user_id,e.email,e.status,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id WHERE e.user_id=?").bind(userId).first();
   const allowed=["pending","code_sent","recovery_pending","recovery_code_sent"];
-  if(!row||!allowed.includes(row.status)) return bad("Richiesta OTP non disponibile.");
+  if(!row||!allowed.includes(row.status))return bad("Richiesta OTP non disponibile.");
   const recovery=row.status.startsWith("recovery_"),status=recovery?"recovery_code_sent":"code_sent";
-  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);
-  const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
+  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
   const otpHash=await hash(otp,String(row.user_id)+":"+row.email);
   const updated=await env.DB.prepare("UPDATE email_verifications SET status=?,otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=? AND status=?").bind(status,otpHash,now+15*60*1000,now,row.user_id,row.status).run();
-  if(!updated.meta?.changes) return Response.json({error:"Richiesta OTP già aggiornata."},{status:409});
+  if(!updated.meta?.changes)return Response.json({error:"Richiesta OTP già aggiornata."},{status:409});
   return Response.json({ok:true,email:row.email,username:row.username,otp,expires_at:now+15*60*1000,recovery});
 }
-
 function isProjectOwner(request) {
   const userId = request.headers.get("x-websim-user-id");
   const ownerId = request.headers.get("x-websim-project-owner-id");
@@ -1656,4 +1600,141 @@ async function adminUpdateUser(request, env) {
   return Response.json({ ok:true });
 }
 
-export default websimWorker;
+// Render / Express adapter. Worker-style route handlers above are retained,
+// backed by Turso in production and a local libSQL file for development.
+import express from 'express';
+import { createClient } from '@libsql/client';
+import { createHmac, timingSafeEqual, webcrypto } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const configuredDatabaseUrl = (process.env.TURSO_DATABASE_URL || '').trim();
+const databaseUrl = configuredDatabaseUrl || 'libsql://nexa-compute-nexa-compute.aws-us-west-2.turso.io';
+const databaseToken = process.env.TURSO_AUTH_TOKEN || process.env.TURSO_DATABASE_AUTH_TOKEN;
+if (!databaseUrl.startsWith('file:') && !databaseToken) throw new Error('Configure TURSO_AUTH_TOKEN (or TURSO_DATABASE_AUTH_TOKEN) for the remote database.');
+const libsql = createClient({ url: databaseUrl, ...(databaseToken ? { authToken: databaseToken } : {}), intMode: 'number' });
+function resultRows(result) {
+  const columns = result.columns || [];
+  return (result.rows || []).map(row => Object.fromEntries(columns.map((name, index) => [name, row[name] ?? row[index] ?? null])));
+}
+function resultMeta(result) {
+  return { changes: Number(result.rowsAffected || 0), last_row_id: result.lastInsertRowid == null ? null : Number(result.lastInsertRowid) };
+}
+function makeD1Adapter(client) {
+  return {
+    async exec(sql) { await client.executeMultiple(sql); },
+    prepare(sql) {
+      const state = { sql, args: [] };
+      const statement = {
+        bind(...args) { state.args = args.map(value => value === undefined ? null : value); return statement; },
+        async run() { const result = await client.execute({ sql: state.sql, args: state.args }); return { meta: resultMeta(result), results: resultRows(result) }; },
+        async all() { const result = await client.execute({ sql: state.sql, args: state.args }); return { meta: resultMeta(result), results: resultRows(result) }; },
+        async first(column) { const result = await client.execute({ sql: state.sql, args: state.args }); const row = resultRows(result)[0] || null; return column && row ? row[column] : row; },
+        _statement: state
+      };
+      return statement;
+    },
+    async batch(statements) {
+      const results = await client.batch(statements.map(statement => ({ sql: statement._statement.sql, args: statement._statement.args })), 'write');
+      return results.map(result => ({ meta: resultMeta(result), results: resultRows(result) }));
+    }
+  };
+}
+const KYC_STORAGE_DIR = process.env.KYC_STORAGE_DIR || process.env.RENDER_DISK_PATH || path.join(__dirname, '.kyc-private');
+const kycBlobStore = {
+  async put(name, data) { const file=path.basename(String(name)).replace(/[^a-zA-Z0-9_.-]/g,'_'); await fs.mkdir(KYC_STORAGE_DIR,{recursive:true}); await fs.writeFile(path.join(KYC_STORAGE_DIR,file),Buffer.from(data)); return {url:'kyc-private://'+file}; },
+  async get(url) { const file=path.basename(String(url).replace(/^kyc-private:\/\//,'')); const bytes=await fs.readFile(path.join(KYC_STORAGE_DIR,file)); return new Response(bytes,{headers:{'Content-Type':'application/octet-stream'}}); }
+};
+const env = { DB: makeD1Adapter(libsql), BLOB: kycBlobStore, TURSO_DB_BOUND: true };
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '1mb' }));
+app.use('/api/kyc', express.raw({ type: () => true, limit: '11mb' }));
+const ADMIN_COOKIE = 'nexa_render_admin';
+const SESSION_SECRET = process.env.SESSION_SECRET || process.env.ADMIN_PASSWORD || 'configure-SESSION_SECRET-before-production';
+function signAdmin(payload) { return createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url'); }
+function constantTimeEqual(a, b) {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+function cookieValue(header, name) {
+  for (const part of String(header || '').split(';')) {
+    const index = part.indexOf('=');
+    if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return '';
+}
+function isRenderAdmin(req) {
+  const value = cookieValue(req.headers.cookie, ADMIN_COOKIE);
+  const split = value.lastIndexOf('.');
+  if (split < 1) return false;
+  const payload = value.slice(0, split), signature = value.slice(split + 1);
+  if (!constantTimeEqual(signature, signAdmin(payload))) return false;
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return session.user === process.env.ADMIN_USERNAME && Number(session.exp) > Date.now();
+  } catch { return false; }
+}
+function setAdminCookie(res, value, maxAge) {
+  const secure = process.env.COOKIE_SECURE === 'false' ? '' : '; Secure';
+  res.setHeader('Set-Cookie', ADMIN_COOKIE + '=' + value + '; Path=/; HttpOnly; SameSite=Strict; Max-Age=' + maxAge + secure);
+}
+app.post('/api/admin/login', async (req, res) => {
+  const expectedUser = process.env.ADMIN_USERNAME || '', expectedPassword = process.env.ADMIN_PASSWORD || '';
+  if (expectedUser && expectedPassword && constantTimeEqual(req.body?.username, expectedUser) && constantTimeEqual(req.body?.password, expectedPassword)) {
+    const payload = Buffer.from(JSON.stringify({ user: expectedUser, exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url');
+    setAdminCookie(res, payload + '.' + signAdmin(payload), 12 * 60 * 60);
+    return res.json({ ok:true, owner:true, permissions:[] });
+  }
+  if (!req.headers['x-session-token']) return res.status(expectedUser && expectedPassword ? 401 : 503).json({ error:'Credenziali non valide: usa l’account operatore o configura ADMIN_USERNAME e ADMIN_PASSWORD.' });
+  try {
+    const origin=req.protocol+'://'+req.get('host'), headers=new Headers(); headers.set('content-type','application/json'); headers.set('x-session-token',String(req.headers['x-session-token']));
+    const response=await websimWorker.fetch(new Request(origin+req.originalUrl,{method:'POST',headers,body:JSON.stringify({})}),env);
+    res.status(response.status); response.headers.forEach((value,name)=>res.setHeader(name,value)); return res.send(Buffer.from(await response.arrayBuffer()));
+  } catch(error) { console.error('Render operator login failed:',error); return res.status(500).json({error:'Errore del server.'}); }
+});
+app.post('/api/admin/logout', (req, res) => { setAdminCookie(res, '', 0); return res.json({ ok: true }); });
+app.all('/api/*', async (req, res) => {
+  const admin = isRenderAdmin(req);
+  if (req.path.startsWith('/api/admin/') && !['/api/admin/login', '/api/admin/logout'].includes(req.path) && !admin && !req.headers['x-session-token']) return res.status(401).json({ error: 'Accesso riservato al proprietario o a un operatore autorizzato.' });
+  try {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (name === 'host' || name === 'content-length' || value == null) continue;
+      headers.set(name, Array.isArray(value) ? value.join(', ') : String(value));
+    }
+    if (admin) {
+      headers.set('x-websim-user-id', 'render-admin');
+      headers.set('x-websim-project-owner-id', 'render-admin');
+      headers.set('x-websim-username', process.env.ADMIN_USERNAME || 'admin');
+    }
+    const method = req.method.toUpperCase();
+    const hasBody = !['GET', 'HEAD'].includes(method) && req.body !== undefined;
+    if (hasBody && !headers.has('content-type')) headers.set('content-type', 'application/json');
+    const origin = req.protocol + '://' + req.get('host');
+    const request = new Request(origin + req.originalUrl, { method, headers, ...(hasBody ? { body: Buffer.isBuffer(req.body) ? req.body : JSON.stringify(req.body) } : {}) });
+    const response = await websimWorker.fetch(request, env);
+    res.status(response.status);
+    response.headers.forEach((value, name) => res.setHeader(name, value));
+    return res.send(Buffer.from(await response.arrayBuffer()));
+  } catch (error) {
+    console.error('Render API error:', req.originalUrl, error);
+    return res.status(500).json({ error: 'Errore del server.' });
+  }
+});
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/index.html', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/script.js', (req, res) => res.sendFile(path.join(__dirname, 'script.js')));
+app.get('/style.css', (req, res) => res.sendFile(path.join(__dirname, 'style.css')));
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+app.use((req, res) => res.status(404).send('Not found'));
+const port = Number(process.env.PORT) || 10000;
+app.listen(port, '0.0.0.0', () => {
+  console.log('Nexa Compute listening on port ' + port);
+  if (databaseUrl.startsWith('file:')) console.warn('Using local SQLite storage. Configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for durable production storage.');
+  if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) console.warn('Set ADMIN_USERNAME and ADMIN_PASSWORD in Render environment variables to enable admin login.');
+});
