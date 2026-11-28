@@ -171,6 +171,12 @@ function makeToken() {
   crypto.getRandomValues(a);
   return [...a].map(b => b.toString(16).padStart(2, "0")).join("");
 }
+function makeUserId() {
+  const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map(byte => alphabet[byte % alphabet.length]).join("");
+}
 async function hash(pw, salt) {
   const data = new TextEncoder().encode(salt + "::" + pw);
   const buf = await crypto.subtle.digest("SHA-256", data);
@@ -699,7 +705,13 @@ async function register(request, env) {
     if (!ref) return Response.json({ error: "Codice invito non valido." }, { status: 400 });
     referredBy = ref.id;
   }
-  const id = makeToken();
+  let id = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = makeUserId();
+    const collision = await env.DB.prepare("SELECT id FROM users WHERE id=?").bind(candidate).first();
+    if (!collision) { id = candidate; break; }
+  }
+  if (!id) return Response.json({ error: "Impossibile generare un ID utente. Riprova." }, { status: 503 });
   const s = genSalt();
   const inviteCode = "H9-" + username.slice(0, 4).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase();
   const ph = await hash(password, s);
