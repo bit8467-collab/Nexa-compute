@@ -372,12 +372,14 @@ const websimWorker = {
       if (method === "GET" && path === "/api/pwa-manifest") return new Response(JSON.stringify({ name: "Nexa Compute", short_name: "Nexa", id: "/", start_url: "/", scope: "/", display: "standalone", background_color: "#0b1020", theme_color: "#0b1020", icons: [{ src: "/api/pwa-icon", sizes: "192x192", type: "image/svg+xml", purpose: "any" }, { src: "/api/pwa-icon", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }] }), { headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" } });
       if (method === "GET" && path === "/api/pwa-icon") return new Response(`<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b1020"/><rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="#c39a46" stroke-width="10"/><text x="256" y="302" text-anchor="middle" font-family="Arial,sans-serif" font-size="190" font-weight="800" fill="#e8c876">NX</text></svg>`, { headers: { "Content-Type": "image/svg+xml; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
       if (method === "GET" && path === "/api/pwa-worker") return new Response(`self.addEventListener("install",event=>event.waitUntil(self.skipWaiting()));self.addEventListener("activate",event=>event.waitUntil(self.clients.claim()));`, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Service-Worker-Allowed": "/", "Cache-Control": "no-cache" } });
-    const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
-    if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
-    let tursoDB;
-    try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
-    catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
-    env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
+    if (!env.TURSO_DB_BOUND) {
+      const tursoToken = String(env.TURSO_AUTH_TOKEN || "").trim();
+      if (!tursoToken) return Response.json({ error: "Turso is not configured. Set the TURSO_AUTH_TOKEN secret." }, { status: 503 });
+      let tursoDB;
+      try { tursoDB = createTursoD1(env.TURSO_DATABASE_URL || TURSO_DEFAULT_URL, tursoToken); }
+      catch { return Response.json({ error: "TURSO_DATABASE_URL is invalid." }, { status: 503 }); }
+      env = new Proxy(env, { get(target, property, receiver) { return property === "DB" ? tursoDB : Reflect.get(target, property, receiver); } });
+    }
     await env.DB.exec(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -472,16 +474,9 @@ const websimWorker = {
         notifications INTEGER NOT NULL DEFAULT 1
       );
       CREATE TABLE IF NOT EXISTS withdrawal_wallet_changes (
-        user_id TEXT PRIMARY KEY,
-        network TEXT NOT NULL,
-        address TEXT NOT NULL,
-        email TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        otp_hash TEXT,
-        otp_expires INTEGER,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        user_id TEXT PRIMARY KEY, network TEXT NOT NULL, address TEXT NOT NULL, email TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', otp_hash TEXT, otp_expires INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS compute_rentals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -744,18 +739,14 @@ async function findRecoveryAccount(env, identifier) {
 }
 async function requestPasswordRecovery(request,env) {
   let body;try{body=await request.json();}catch{return bad("Inserisci il tuo account.");}
-  const identifier=recoveryIdentifier(body);
-  if(!identifier) return bad("Inserisci un identificativo valido.");
-  const account=await findRecoveryAccount(env,identifier);
-  if(!account?.recovery_email) return Response.json({ok:true});
-  const now=Date.now();
-  const previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
-  if(previous?.email===account.recovery_email&&previous.status==="recovery_code_sent"&&Number(previous.otp_expires||0)>now) return Response.json({ok:true});
-  if(previous?.email===account.recovery_email&&previous.status==="recovery_pending"&&now-Number(previous.updated_at||0)<60000) return Response.json({ok:true});
+  const identifier=recoveryIdentifier(body);if(!identifier)return bad("Inserisci un identificativo valido.");
+  const account=await findRecoveryAccount(env,identifier);if(!account?.recovery_email)return Response.json({ok:true});
+  const now=Date.now(),previous=await env.DB.prepare("SELECT email,status,otp_expires,updated_at FROM email_verifications WHERE user_id=?").bind(account.id).first();
+  if(previous?.email===account.recovery_email&&previous.status==="recovery_code_sent"&&Number(previous.otp_expires||0)>now)return Response.json({ok:true});
+  if(previous?.email===account.recovery_email&&previous.status==="recovery_pending"&&now-Number(previous.updated_at||0)<60000)return Response.json({ok:true});
   await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'recovery_pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='recovery_pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(account.id,account.recovery_email,now,now).run();
   return Response.json({ok:true});
 }
-
 async function resetPasswordWithOtp(request,env) {
   let body;try{body=await request.json();}catch{return bad("Dati di recupero non validi.");}
   const identifier=recoveryIdentifier(body),code=String(body.code||"").trim(),next=typeof body.password==="string"?body.password:"";
@@ -897,8 +888,8 @@ async function requestWithdrawalWalletChange(request, env) {
   const verified = await env.DB.prepare("SELECT email FROM email_verifications WHERE user_id=? AND status='verified'").bind(user.id).first();
   const email = String(verified?.email || (user.identifier.includes("@") ? user.identifier : "")).trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return Response.json({ error: "Indirizzo email verificato non disponibile." }, { status: 400 });
-  const existing = await env.DB.prepare("SELECT withdraw_wallets FROM settings WHERE user_id=?").bind(user.id).first();
-  let wallets = {}; try { wallets = JSON.parse(existing?.withdraw_wallets || "{}"); } catch {}
+  const saved = await env.DB.prepare("SELECT withdraw_wallets FROM settings WHERE user_id=?").bind(user.id).first();
+  let wallets = {}; try { wallets = JSON.parse(saved?.withdraw_wallets || "{}"); } catch {}
   if (!wallets[network]) return Response.json({ error: "Associa prima un indirizzo per questa rete." }, { status: 409 });
   if (wallets[network] === address) return Response.json({ error: "Il nuovo indirizzo coincide con quello attuale." }, { status: 400 });
   const now = Date.now();
@@ -914,7 +905,7 @@ async function generateWithdrawalWalletOtp(request, env) {
   if (!row || !["pending","code_sent"].includes(row.status)) return bad("Richiesta OTP wallet non disponibile.");
   const bytes = new Uint32Array(1); crypto.getRandomValues(bytes);
   const otp = String(bytes[0] % 1000000).padStart(6,"0"), now = Date.now();
-  const otpHash = await hash(otp, String(row.user_id) + ":" + row.email + ":" + row.address);
+  const otpHash = await hash(otp,String(row.user_id)+":"+row.email+":"+row.address);
   const updated = await env.DB.prepare("UPDATE withdrawal_wallet_changes SET status='code_sent',otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=? AND status=?").bind(otpHash,now+15*60*1000,now,row.user_id,row.status).run();
   if (!updated.meta?.changes) return Response.json({error:"Richiesta OTP già aggiornata."},{status:409});
   return Response.json({ok:true,email:row.email,username:row.username,network:row.network,address:row.address,otp,expires_at:now+15*60*1000});
@@ -1290,7 +1281,6 @@ async function requestEmailVerification(request, env) {
   await env.DB.prepare("INSERT INTO email_verifications (user_id,email,status,created_at,updated_at,otp_hash,otp_expires,attempts) VALUES (?,?, 'pending',?,?,NULL,NULL,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,status='pending',created_at=excluded.created_at,updated_at=excluded.updated_at,otp_hash=NULL,otp_expires=NULL,attempts=0").bind(user.id,email,now,now).run();
   return Response.json({ok:true,status:"pending"});
 }
-
 async function verifyEmailCode(request, env) {
   const user = await sessionUser(request, env);
   if (!user) return Response.json({ error: "Non autenticato." }, { status: 401 });
@@ -1401,20 +1391,18 @@ async function adminEmailVerifications(request, env) {
 }
 async function generateEmailOtp(request, env) {
   const access=await requireAdminPermission(request,env,"verification");
-  if(!access) return Response.json({error:"Permesso amministratore mancante."},{status:403});
+  if(!access)return Response.json({error:"Permesso amministratore mancante."},{status:403});
   const body=await request.json(),userId=String(body.id||"");
   const row=await env.DB.prepare("SELECT e.user_id,e.email,e.status,u.username FROM email_verifications e JOIN users u ON u.id=e.user_id WHERE e.user_id=?").bind(userId).first();
   const allowed=["pending","code_sent","recovery_pending","recovery_code_sent"];
-  if(!row||!allowed.includes(row.status)) return bad("Richiesta OTP non disponibile.");
+  if(!row||!allowed.includes(row.status))return bad("Richiesta OTP non disponibile.");
   const recovery=row.status.startsWith("recovery_"),status=recovery?"recovery_code_sent":"code_sent";
-  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);
-  const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
+  const bytes=new Uint32Array(1);crypto.getRandomValues(bytes);const otp=String(bytes[0]%1000000).padStart(6,"0"),now=Date.now();
   const otpHash=await hash(otp,String(row.user_id)+":"+row.email);
   const updated=await env.DB.prepare("UPDATE email_verifications SET status=?,otp_hash=?,otp_expires=?,attempts=0,updated_at=? WHERE user_id=? AND status=?").bind(status,otpHash,now+15*60*1000,now,row.user_id,row.status).run();
-  if(!updated.meta?.changes) return Response.json({error:"Richiesta OTP già aggiornata."},{status:409});
+  if(!updated.meta?.changes)return Response.json({error:"Richiesta OTP già aggiornata."},{status:409});
   return Response.json({ok:true,email:row.email,username:row.username,otp,expires_at:now+15*60*1000,recovery});
 }
-
 function isProjectOwner(request) {
   const userId = request.headers.get("x-websim-user-id");
   const ownerId = request.headers.get("x-websim-project-owner-id");
@@ -1715,93 +1703,141 @@ async function adminUpdateUser(request, env) {
   return Response.json({ ok:true });
 }
 
-export default websimWorker;
-
-// Render runs this module as a Node process; Websim continues using the worker export above.
-async function startRenderServer() {
-  const [{ createServer }, { readFile, stat }, pathModule] = await Promise.all([
-    import("node:http"),
-    import("node:fs/promises"),
-    import("node:path")
-  ]);
-  const root = process.cwd();
-  const mimeTypes = {
-    ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
-    ".webmanifest": "application/manifest+json; charset=utf-8", ".svg": "image/svg+xml",
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".webp": "image/webp", ".avif": "image/avif", ".ico": "image/x-icon",
-    ".woff2": "font/woff2"
-  };
-  const sendFile = async (file, response, method) => {
-    const content = await readFile(file);
-    response.writeHead(200, {
-      "Content-Type": mimeTypes[pathModule.extname(file).toLowerCase()] || "application/octet-stream",
-      "Content-Length": content.length,
-      "Cache-Control": "no-cache",
-      "X-Content-Type-Options": "nosniff"
-    });
-    response.end(method === "HEAD" ? undefined : content);
-  };
-  const server = createServer(async (incoming, outgoing) => {
-    try {
-      const url = new URL(incoming.url || "/", "http://localhost");
-      if (url.pathname.startsWith("/api/")) {
-        const headers = new Headers();
-        for (const [name, raw] of Object.entries(incoming.headers)) {
-          if (raw == null || ["host", "connection", "transfer-encoding", "content-length", "x-websim-user-id", "x-websim-project-owner-id"].includes(name.toLowerCase())) continue;
-          headers.set(name, Array.isArray(raw) ? raw.join(", ") : String(raw));
-        }
-        const method = incoming.method || "GET";
-        let body;
-        if (method !== "GET" && method !== "HEAD") {
-          const chunks = []; let size = 0;
-          for await (const chunk of incoming) {
-            size += chunk.length;
-            if (size > 12 * 1024 * 1024) {
-              outgoing.writeHead(413, { "Content-Type": "application/json; charset=utf-8" });
-              outgoing.end(JSON.stringify({ error: "Richiesta troppo grande." }));
-              return;
-            }
-            chunks.push(chunk);
-          }
-          body = Buffer.concat(chunks);
-        }
-        const requestInit = { method, headers };
-        if (body) { requestInit.body = body; requestInit.duplex = "half"; }
-        const request = new Request(new URL(incoming.url || "/", "http://localhost"), requestInit);
-        const runtimeEnv = {
-          TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL,
-          TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN
-        };
-        const result = await websimWorker.fetch(request, runtimeEnv);
-        const responseHeaders = {};
-        for (const [name, value] of result.headers) responseHeaders[name] = value;
-        outgoing.writeHead(result.status, responseHeaders);
-        outgoing.end(Buffer.from(await result.arrayBuffer()));
-        return;
-      }
-
-      let pathname;
-      try { pathname = decodeURIComponent(url.pathname); }
-      catch { outgoing.writeHead(400); outgoing.end("Bad request"); return; }
-      const requested = pathname === "/" ? "/index.html" : pathname;
-      const file = pathModule.resolve(root, "." + requested);
-      if (file !== root && !file.startsWith(root + pathModule.sep)) {
-        outgoing.writeHead(403); outgoing.end("Forbidden"); return;
-      }
-      try {
-        if ((await stat(file)).isFile()) { await sendFile(file, outgoing, incoming.method || "GET"); return; }
-      } catch {}
-      if (!pathModule.extname(pathname)) { await sendFile(pathModule.join(root, "index.html"), outgoing, incoming.method || "GET"); return; }
-      outgoing.writeHead(404); outgoing.end("Not found");
-    } catch (error) {
-      console.error("Render request failed:", error);
-      if (!outgoing.headersSent) outgoing.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-      outgoing.end("Internal server error");
-    }
-  });
-  const port = Number.parseInt(process.env.PORT || "10000", 10);
-  server.listen(port, "0.0.0.0", () => console.log("Render server listening on port " + port));
+// Render / Express adapter. Worker-style route handlers above are retained,
+// backed by Turso in production and a local libSQL file for development.
+import express from 'express';
+import { createClient } from '@libsql/client';
+import { createHmac, timingSafeEqual, webcrypto } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const configuredDatabaseUrl = (process.env.TURSO_DATABASE_URL || '').trim();
+const databaseUrl = configuredDatabaseUrl || 'libsql://nexa-compute-nexa-compute.aws-us-west-2.turso.io';
+const databaseToken = process.env.TURSO_AUTH_TOKEN || process.env.TURSO_DATABASE_AUTH_TOKEN;
+if (!databaseUrl.startsWith('file:') && !databaseToken) throw new Error('Configure TURSO_AUTH_TOKEN (or TURSO_DATABASE_AUTH_TOKEN) for the remote database.');
+const libsql = createClient({ url: databaseUrl, ...(databaseToken ? { authToken: databaseToken } : {}), intMode: 'number' });
+function resultRows(result) {
+  const columns = result.columns || [];
+  return (result.rows || []).map(row => Object.fromEntries(columns.map((name, index) => [name, row[name] ?? row[index] ?? null])));
 }
-if (typeof process !== "undefined" && process.versions?.node) startRenderServer().catch(error => { console.error("Unable to start Render server:", error); process.exitCode = 1; });
+function resultMeta(result) {
+  return { changes: Number(result.rowsAffected || 0), last_row_id: result.lastInsertRowid == null ? null : Number(result.lastInsertRowid) };
+}
+function makeD1Adapter(client) {
+  return {
+    async exec(sql) { await client.executeMultiple(sql); },
+    prepare(sql) {
+      const state = { sql, args: [] };
+      const statement = {
+        bind(...args) { state.args = args.map(value => value === undefined ? null : value); return statement; },
+        async run() { const result = await client.execute({ sql: state.sql, args: state.args }); return { meta: resultMeta(result), results: resultRows(result) }; },
+        async all() { const result = await client.execute({ sql: state.sql, args: state.args }); return { meta: resultMeta(result), results: resultRows(result) }; },
+        async first(column) { const result = await client.execute({ sql: state.sql, args: state.args }); const row = resultRows(result)[0] || null; return column && row ? row[column] : row; },
+        _statement: state
+      };
+      return statement;
+    },
+    async batch(statements) {
+      const results = await client.batch(statements.map(statement => ({ sql: statement._statement.sql, args: statement._statement.args })), 'write');
+      return results.map(result => ({ meta: resultMeta(result), results: resultRows(result) }));
+    }
+  };
+}
+const KYC_STORAGE_DIR = process.env.KYC_STORAGE_DIR || process.env.RENDER_DISK_PATH || path.join(__dirname, '.kyc-private');
+const kycBlobStore = {
+  async put(name, data) { const file=path.basename(String(name)).replace(/[^a-zA-Z0-9_.-]/g,'_'); await fs.mkdir(KYC_STORAGE_DIR,{recursive:true}); await fs.writeFile(path.join(KYC_STORAGE_DIR,file),Buffer.from(data)); return {url:'kyc-private://'+file}; },
+  async get(url) { const file=path.basename(String(url).replace(/^kyc-private:\/\//,'')); const bytes=await fs.readFile(path.join(KYC_STORAGE_DIR,file)); return new Response(bytes,{headers:{'Content-Type':'application/octet-stream'}}); }
+};
+const env = { DB: makeD1Adapter(libsql), BLOB: kycBlobStore, TURSO_DB_BOUND: true };
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '1mb' }));
+app.use('/api/kyc', express.raw({ type: () => true, limit: '11mb' }));
+const ADMIN_COOKIE = 'nexa_render_admin';
+const SESSION_SECRET = process.env.SESSION_SECRET || process.env.ADMIN_PASSWORD || 'configure-SESSION_SECRET-before-production';
+function signAdmin(payload) { return createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url'); }
+function constantTimeEqual(a, b) {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+function cookieValue(header, name) {
+  for (const part of String(header || '').split(';')) {
+    const index = part.indexOf('=');
+    if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return '';
+}
+function isRenderAdmin(req) {
+  const value = cookieValue(req.headers.cookie, ADMIN_COOKIE);
+  const split = value.lastIndexOf('.');
+  if (split < 1) return false;
+  const payload = value.slice(0, split), signature = value.slice(split + 1);
+  if (!constantTimeEqual(signature, signAdmin(payload))) return false;
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return session.user === process.env.ADMIN_USERNAME && Number(session.exp) > Date.now();
+  } catch { return false; }
+}
+function setAdminCookie(res, value, maxAge) {
+  const secure = process.env.COOKIE_SECURE === 'false' ? '' : '; Secure';
+  res.setHeader('Set-Cookie', ADMIN_COOKIE + '=' + value + '; Path=/; HttpOnly; SameSite=Strict; Max-Age=' + maxAge + secure);
+}
+app.post('/api/admin/login', async (req, res) => {
+  const expectedUser = process.env.ADMIN_USERNAME || '', expectedPassword = process.env.ADMIN_PASSWORD || '';
+  if (expectedUser && expectedPassword && constantTimeEqual(req.body?.username, expectedUser) && constantTimeEqual(req.body?.password, expectedPassword)) {
+    const payload = Buffer.from(JSON.stringify({ user: expectedUser, exp: Date.now() + 12 * 60 * 60 * 1000 })).toString('base64url');
+    setAdminCookie(res, payload + '.' + signAdmin(payload), 12 * 60 * 60);
+    return res.json({ ok:true, owner:true, permissions:[] });
+  }
+  if (!req.headers['x-session-token']) return res.status(expectedUser && expectedPassword ? 401 : 503).json({ error:'Credenziali non valide: usa l’account operatore o configura ADMIN_USERNAME e ADMIN_PASSWORD.' });
+  try {
+    const origin=req.protocol+'://'+req.get('host'), headers=new Headers(); headers.set('content-type','application/json'); headers.set('x-session-token',String(req.headers['x-session-token']));
+    const response=await websimWorker.fetch(new Request(origin+req.originalUrl,{method:'POST',headers,body:JSON.stringify({})}),env);
+    res.status(response.status); response.headers.forEach((value,name)=>res.setHeader(name,value)); return res.send(Buffer.from(await response.arrayBuffer()));
+  } catch(error) { console.error('Render operator login failed:',error); return res.status(500).json({error:'Errore del server.'}); }
+});
+app.post('/api/admin/logout', (req, res) => { setAdminCookie(res, '', 0); return res.json({ ok: true }); });
+app.all('/api/*', async (req, res) => {
+  const admin = isRenderAdmin(req);
+  if (req.path.startsWith('/api/admin/') && !['/api/admin/login', '/api/admin/logout'].includes(req.path) && !admin && !req.headers['x-session-token']) return res.status(401).json({ error: 'Accesso riservato al proprietario o a un operatore autorizzato.' });
+  try {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (name === 'host' || name === 'content-length' || value == null) continue;
+      headers.set(name, Array.isArray(value) ? value.join(', ') : String(value));
+    }
+    if (admin) {
+      headers.set('x-websim-user-id', 'render-admin');
+      headers.set('x-websim-project-owner-id', 'render-admin');
+      headers.set('x-websim-username', process.env.ADMIN_USERNAME || 'admin');
+    }
+    const method = req.method.toUpperCase();
+    const hasBody = !['GET', 'HEAD'].includes(method) && req.body !== undefined;
+    if (hasBody && !headers.has('content-type')) headers.set('content-type', 'application/json');
+    const origin = req.protocol + '://' + req.get('host');
+    const request = new Request(origin + req.originalUrl, { method, headers, ...(hasBody ? { body: Buffer.isBuffer(req.body) ? req.body : JSON.stringify(req.body) } : {}) });
+    const response = await websimWorker.fetch(request, env);
+    res.status(response.status);
+    response.headers.forEach((value, name) => res.setHeader(name, value));
+    return res.send(Buffer.from(await response.arrayBuffer()));
+  } catch (error) {
+    console.error('Render API error:', req.originalUrl, error);
+    return res.status(500).json({ error: 'Errore del server.' });
+  }
+});
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/index.html', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/script.js', (req, res) => res.sendFile(path.join(__dirname, 'script.js')));
+app.get('/style.css', (req, res) => res.sendFile(path.join(__dirname, 'style.css')));
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+app.use((req, res) => res.status(404).send('Not found'));
+const port = Number(process.env.PORT) || 10000;
+app.listen(port, '0.0.0.0', () => {
+  console.log('Nexa Compute listening on port ' + port);
+  if (databaseUrl.startsWith('file:')) console.warn('Using local SQLite storage. Configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for durable production storage.');
+  if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) console.warn('Set ADMIN_USERNAME and ADMIN_PASSWORD in Render environment variables to enable admin login.');
+});
